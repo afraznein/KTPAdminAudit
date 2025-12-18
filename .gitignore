@@ -1,0 +1,16 @@
+# Compiled plugins (keep source, compile fresh)
+# Note: We include .amxx for convenience, but source is authoritative
+compiled/
+
+# Editor backups
+*.bak
+*~
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
