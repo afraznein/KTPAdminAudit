@@ -2,6 +2,44 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.1.0] - 2025-12-21
+
+### Changed
+- **ktp_drop_client native** - Uses new KTPAMXX native instead of `server_cmd("kick")`
+  - Calls ReHLDS `DropClient` API directly
+  - Bypasses blocked kick console command in KTP ReHLDS
+  - Requires KTP AMX 2.5+ with ReHLDS API integration
+
+### Fixed
+- Kick execution now works with KTP ReHLDS where kick command is blocked at engine level
+
+### Build
+- Updated compile.bat to use WSL with KTPAMXX Linux compiler
+- Automatic staging to server plugins directory
+
+## [2.0.0] - 2025-12-20
+
+### Added
+- **Menu-based kick/ban** - Interactive player selection menus
+- **Ban duration selection** - 1 hour, 1 day, 1 week, or permanent
+- **Admin flag permissions** - ADMIN_KICK (c) for kick, ADMIN_BAN (d) for ban
+- **Immunity protection** - Players with ADMIN_IMMUNITY (a) cannot be kicked/banned
+- `.kick` and `/kick` commands for kick menu
+- `.ban` and `/ban` commands for ban menu
+
+### Changed
+- Complete rewrite from RCON interception to menu-based system
+- Admins must be **connected to server** to use kick/ban
+- All actions require appropriate admin flags in users.ini
+
+### Removed
+- RCON kick command interception (no longer needed)
+- Console-based kick command hook
+
+### Security
+- Prevents remote/untraceable kicks via HLSW or RCON
+- Full audit trail: admin name, SteamID, IP, target details, action
+
 ## [1.2.0] - 2025-12-03
 
 ### Fixed

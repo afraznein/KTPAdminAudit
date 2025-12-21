@@ -1,415 +1,570 @@
-/* KTP Admin Audit v1.2.0
- * Logs administrative actions (RCON kicks, bans, etc.) to Discord
+/* KTP Admin Audit v2.1.0
+ * Menu-based admin kick/ban with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 1.2.0
- * DATE: 2025-12-03
+ * VERSION: 2.1.0
+ * DATE: 2025-12-21
+ * GITHUB: https://github.com/KTP-Community/KTPAdminAudit
+ *
+ * ========== OVERVIEW ==========
+ * Provides secure, auditable kick and ban functionality. Unlike RCON-based
+ * commands, this plugin requires admins to be connected to the server and
+ * logs all actions to Discord for accountability.
+ *
+ * Designed to work with ReHLDS that has kick/ban commands blocked at the
+ * engine level, ensuring all player removals go through this audited system.
  *
  * ========== FEATURES ==========
- * - Monitors and logs RCON kick commands
- * - Records admin identity (SteamID, name, IP)
- * - Records target player identity
- * - Sends notifications to Discord webhook
- * - Multi-channel support (sends to ALL configured audit channels)
- * - Comprehensive logging to AMX logs
+ * - Menu-based player selection for kick/ban
+ * - Admin flag-based permissions (ADMIN_KICK, ADMIN_BAN)
+ * - Ban duration selection (1 hour, 1 day, 1 week, permanent)
+ * - Full Discord audit logging to all configured audit channels
+ * - Immunity protection (ADMIN_IMMUNITY)
+ * - Pagination for servers with many players
+ * - Failed attempt logging
  *
  * ========== REQUIREMENTS ==========
- * - AMX ModX 1.9+
- * - ReHLDS (recommended for better hook support)
- * - cURL extension (for Discord notifications)
+ * - KTP AMX / AMX Mod X 1.9+
+ * - KTP ReHLDS with kick/ban commands blocked (recommended)
+ * - ktp_discord.inc (shared Discord integration)
+ *
+ * ========== COMMANDS ==========
+ *   .kick / /kick  - Open kick menu (requires ADMIN_KICK flag "c")
+ *   .ban  / /ban   - Open ban menu (requires ADMIN_BAN flag "d")
+ *
+ * ========== ADMIN FLAGS ==========
+ *   c - ADMIN_KICK     - Required to kick players
+ *   d - ADMIN_BAN      - Required to ban players
+ *   a - ADMIN_IMMUNITY - Protected from kick/ban
  *
  * ========== CONFIGURATION ==========
- * Uses same discord.ini as KTPMatchHandler
- * Path: <configsdir>/discord.ini (e.g., addons/ktpamx/configs/discord.ini)
+ * Uses shared discord.ini via ktp_discord.inc
+ * Path: <configsdir>/discord.ini
  *
- * Required keys:
- *   discord_relay_url=<your relay endpoint>
- *   discord_channel_id=<your channel ID>
- *   discord_auth_secret=<your auth secret>
- *
- * Optional audit channel keys (can configure multiple):
- *   discord_channel_id_audit_competitive=<competitive audit channel>
- *   discord_channel_id_audit_12man=<12man/draft audit channel>
- *   discord_channel_id_audit_scrim=<scrim audit channel>
- *   discord_channel_id_admin=<legacy general admin channel>
- *
- * NOTE: Audit messages will be sent to ALL configured audit channels.
- *       This allows you to have separate audit logs for different match types.
- *
- * ========== CVARS ==========
- *   ktp_audit_discord_ini "<configsdir>/discord.ini"  // Path to Discord config (auto-detected)
- *   ktp_audit_log "1"                                  // Enable/disable logging
+ * Audit messages are sent to all channels matching:
+ *   discord_channel_id_audit*
+ *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.1.0 (2025-12-21) - ReHLDS DropClient Integration
+ *   * CHANGED: Uses ktp_drop_client native instead of server_cmd("kick")
+ *   * CHANGED: Works with ReHLDS where kick command is blocked at engine level
+ *   + ADDED: ktp_drop_client calls ReHLDS DropClient API directly
+ *
+ * v2.0.0 (2025-12-20) - Complete Overhaul
+ *   * REPLACED: Old RCON interception with menu-based kick/ban system
+ *   + ADDED: Menu-based kick command (.kick)
+ *   + ADDED: Menu-based ban command (.ban) with duration selection
+ *   + ADDED: Ban durations: 1 hour, 1 day, 1 week, permanent
+ *   + ADDED: Immunity protection (ADMIN_IMMUNITY flag)
+ *   + ADDED: Pagination for player selection menus
+ *   + ADDED: Failed attempt logging
+ *   * CHANGED: Uses ktp_discord.inc for Discord integration
+ *   * CHANGED: Designed for ReHLDS with blocked kick/ban commands
+ *   - REMOVED: RCON command interception (obsolete with ReHLDS changes)
+ *
+ * v1.3.0 (2025-12-20) - Shared Discord Config
+ *   * CHANGED: Now uses ktp_discord.inc for config loading
+ *
  * v1.2.0 (2025-12-03) - KTP AMX Compatibility
- *   * FIXED: Changed from register_srvcmd to register_concmd for kick command
- *     (register_srvcmd cannot hook built-in engine commands)
- *   * FIXED: Use get_configsdir() for dynamic config path resolution
- *   * IMPROVED: Now works properly with KTP AMX and standard AMX Mod X
+ *   * FIXED: Changed from register_srvcmd to register_concmd
  *
  * v1.1.0 (2025-11-24) - Multi-Channel Audit Support
- *   + ADDED: Per-match-type audit channels (competitive, 12man, scrim)
- *   + CHANGED: Now sends to ALL configured audit channels (not just one)
- *   * IMPROVED: Better channel configuration flexibility
+ *   + ADDED: Per-match-type audit channels
  *
  * v1.0.0 (2025-11-24) - Initial Release
  *   + ADDED: RCON kick detection and logging
- *   + ADDED: Discord notification with admin and target details
- *   + ADDED: SteamID, name, and IP logging for accountability
- *   + ADDED: Separate admin audit Discord channel support
  */
 
 #include <amxmodx>
 #include <amxmisc>
-
-#if defined _reapi_included
-    #define HAS_REAPI
-#endif
-
-#if defined _curl_included
-    #define HAS_CURL
-#endif
+#include <ktp_discord>
 
 #pragma semicolon 1
 
+// KTP native for dropping clients via ReHLDS API (bypasses blocked kick command)
+native ktp_drop_client(id, const reason[] = "");
+
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "1.2.0"
+#define VERSION "2.1.0"
 #define AUTHOR "Nein_"
 
-#define MAX_PLAYERS 32
-#define MAX_AUDIT_CHANNELS 10
+// Menu action constants
+#define ACTION_NONE     0
+#define ACTION_KICK     1
+#define ACTION_BAN      2
 
-// Discord config
-new g_discordRelayUrl[256];
-new g_discordChannelId[64];
-new g_discordAuthSecret[128];
+// Menu state per player
+new g_menuAction[33];       // ACTION_NONE, ACTION_KICK, or ACTION_BAN
+new g_menuTarget[33];       // Selected target player id
+new g_menuPage[33];         // Current menu page for pagination
+new g_validPlayers[33][32]; // Valid player indices for each admin
+new g_validPlayerCount[33]; // Count of valid players
 
-// Audit channels (can have multiple)
-new g_auditChannels[MAX_AUDIT_CHANNELS][64];
-new g_auditChannelCount = 0;
+// Ban duration options (in minutes, 0 = permanent)
+new const g_banDurations[] = { 60, 1440, 10080, 0 };
+new const g_banDurationNames[][] = { "1 Hour", "1 Day", "1 Week", "Permanent" };
 
-// CVARs
-new g_cvarDiscordIni;
-new g_cvarAuditLog;
+public plugin_init()
+{
+	register_plugin(PLUGIN, VERSION, AUTHOR);
 
-// Server info
-new g_serverHostname[128];
+	// Register kick commands
+	register_clcmd("say .kick", "cmd_kick");
+	register_clcmd("say_team .kick", "cmd_kick");
+	register_clcmd("say /kick", "cmd_kick");
+	register_clcmd("say_team /kick", "cmd_kick");
+	register_clcmd("ktp_kick", "cmd_kick");  // Console command
 
-public plugin_init() {
-    register_plugin(PLUGIN, VERSION, AUTHOR);
+	// Register ban commands
+	register_clcmd("say .ban", "cmd_ban");
+	register_clcmd("say_team .ban", "cmd_ban");
+	register_clcmd("say /ban", "cmd_ban");
+	register_clcmd("say_team /ban", "cmd_ban");
+	register_clcmd("ktp_ban", "cmd_ban");  // Console command
 
-    // Register CVARs - use get_configsdir() for proper path
-    new configsDir[128];
-    get_configsdir(configsDir, charsmax(configsDir));
-    new defaultIniPath[192];
-    formatex(defaultIniPath, charsmax(defaultIniPath), "%s/discord.ini", configsDir);
-    g_cvarDiscordIni = register_cvar("ktp_audit_discord_ini", defaultIniPath);
-    g_cvarAuditLog = register_cvar("ktp_audit_log", "1");
+	// Menu handlers
+	register_menucmd(register_menuid("KTP Kick Menu"), 1023, "menu_player_handler");
+	register_menucmd(register_menuid("KTP Ban Menu"), 1023, "menu_player_handler");
+	register_menucmd(register_menuid("KTP Ban Duration"), 1023, "menu_duration_handler");
 
-    // Hook the kick command using register_concmd
-    // This intercepts the command before the engine processes it
-    // Using ADMIN_RCON flag so only RCON/admin executions trigger our handler
-    register_concmd("kick", "cmd_kick", ADMIN_RCON, "- intercepts kick for audit logging");
-
-    // Cache server hostname
-    get_cvar_string("hostname", g_serverHostname, charsmax(g_serverHostname));
-
-    log_amx("[KTP Admin Audit] Plugin initialized v%s", VERSION);
+	log_amx("[%s] v%s initialized", PLUGIN, VERSION);
 }
 
-public plugin_cfg() {
-    load_discord_config();
+public plugin_cfg()
+{
+	// Load shared Discord configuration
+	ktp_discord_load_config();
 }
 
-// ================= Client Connect =================
-public client_putinserver(id) {
-    if (!is_user_bot(id) && !is_user_hltv(id)) {
-        set_task(5.0, "fn_version_display", id);
-    }
+public client_putinserver(id)
+{
+	// Announce to admins with a delay
+	if (!is_user_bot(id) && !is_user_hltv(id))
+	{
+		if (get_user_flags(id) & (ADMIN_KICK | ADMIN_BAN))
+		{
+			set_task(5.0, "fn_show_version", id);
+		}
+	}
 }
 
-public fn_version_display(id) {
-    if (is_user_connected(id)) {
-        client_print(id, print_chat, "%s version %s by %s", PLUGIN, VERSION, AUTHOR);
-        client_print(id, print_console, "%s version %s by %s", PLUGIN, VERSION, AUTHOR);
-    }
+public fn_show_version(id)
+{
+	if (!is_user_connected(id))
+		return;
+
+	client_print(id, print_chat, "[KTP] %s v%s by %s", PLUGIN, VERSION, AUTHOR);
+	client_print(id, print_chat, "[KTP] Use .kick or .ban for audited admin actions.");
 }
 
-// ================= RCON Command Hooks =================
-public cmd_kick() {
-    // Get command arguments
-    new arg1[64], arg2[128];
-    read_argv(1, arg1, charsmax(arg1));  // Target (can be name, userid, or steamid)
-    read_argv(2, arg2, charsmax(arg2));  // Reason (optional)
-
-    // Find who executed the command
-    new adminId = find_admin_executing_command();
-    new adminName[32], adminAuthId[44], adminIp[32];
-
-    if (adminId > 0 && is_user_connected(adminId)) {
-        get_user_name(adminId, adminName, charsmax(adminName));
-        get_user_authid(adminId, adminAuthId, charsmax(adminAuthId));
-        get_user_ip(adminId, adminIp, charsmax(adminIp), 1);
-    } else {
-        copy(adminName, charsmax(adminName), "Console/RCON");
-        copy(adminAuthId, charsmax(adminAuthId), "N/A");
-        copy(adminIp, charsmax(adminIp), "N/A");
-    }
-
-    // Try to find target player
-    new targetId = find_target_player(arg1);
-    new targetName[32], targetAuthId[44], targetIp[32];
-
-    if (targetId > 0 && is_user_connected(targetId)) {
-        get_user_name(targetId, targetName, charsmax(targetName));
-        get_user_authid(targetId, targetAuthId, charsmax(targetAuthId));
-        get_user_ip(targetId, targetIp, charsmax(targetIp), 1);
-    } else {
-        copy(targetName, charsmax(targetName), arg1);
-        copy(targetAuthId, charsmax(targetAuthId), "Unknown");
-        copy(targetIp, charsmax(targetIp), "Unknown");
-    }
-
-    new reason[128];
-    if (arg2[0]) {
-        copy(reason, charsmax(reason), arg2);
-    } else {
-        copy(reason, charsmax(reason), "No reason specified");
-    }
-
-    // Log to AMX
-    log_amx("[KTP Admin Audit] KICK | Admin: %s [%s | %s] | Target: %s [%s | %s] | Reason: %s",
-        adminName, adminAuthId, adminIp,
-        targetName, targetAuthId, targetIp,
-        reason);
-
-    // Send to Discord
-    #if defined HAS_CURL
-    if (get_pcvar_num(g_cvarAuditLog)) {
-        send_kick_to_discord(adminName, adminAuthId, adminIp, targetName, targetAuthId, targetIp, reason);
-    }
-    #endif
-
-    return PLUGIN_CONTINUE;
+public client_disconnected(id)
+{
+	// Clear menu state
+	g_menuAction[id] = ACTION_NONE;
+	g_menuTarget[id] = 0;
+	g_menuPage[id] = 0;
 }
 
-// ================= Helper Functions =================
-stock find_admin_executing_command() {
-    // Try to find the player who executed the command
-    // This is best-effort - RCON commands don't always have a clear source
-    new players[MAX_PLAYERS], pnum;
-    get_players(players, pnum, "ch");
+// ===========================================================================
+// Kick Command
+// ===========================================================================
 
-    // Check for admin flag holders
-    for (new i = 0; i < pnum; i++) {
-        new id = players[i];
-        if (get_user_flags(id) & ADMIN_KICK) {
-            return id;
-        }
-    }
+public cmd_kick(id)
+{
+	// Check admin flag
+	if (!(get_user_flags(id) & ADMIN_KICK))
+	{
+		client_print(id, print_chat, "[KTP] You don't have permission to kick players.");
+		log_failed_attempt(id, "kick");
+		return PLUGIN_HANDLED;
+	}
 
-    return 0;  // Console/RCON
+	// Build list of kickable players
+	if (!build_player_list(id, true))
+	{
+		client_print(id, print_chat, "[KTP] No players available to kick.");
+		return PLUGIN_HANDLED;
+	}
+
+	// Show player selection menu
+	g_menuAction[id] = ACTION_KICK;
+	g_menuPage[id] = 0;
+	show_player_menu(id);
+
+	return PLUGIN_HANDLED;
 }
 
-stock find_target_player(const target[]) {
-    // Try to find player by name, userid, or authid
-    new players[MAX_PLAYERS], pnum;
-    get_players(players, pnum, "ch");
+// ===========================================================================
+// Ban Command
+// ===========================================================================
 
-    // Try exact name match
-    for (new i = 0; i < pnum; i++) {
-        new id = players[i];
-        new name[32];
-        get_user_name(id, name, charsmax(name));
-        if (equal(name, target)) {
-            return id;
-        }
-    }
+public cmd_ban(id)
+{
+	// Check admin flag
+	if (!(get_user_flags(id) & ADMIN_BAN))
+	{
+		client_print(id, print_chat, "[KTP] You don't have permission to ban players.");
+		log_failed_attempt(id, "ban");
+		return PLUGIN_HANDLED;
+	}
 
-    // Try partial name match
-    for (new i = 0; i < pnum; i++) {
-        new id = players[i];
-        new name[32];
-        get_user_name(id, name, charsmax(name));
-        if (containi(name, target) != -1) {
-            return id;
-        }
-    }
+	// Build list of bannable players
+	if (!build_player_list(id, true))
+	{
+		client_print(id, print_chat, "[KTP] No players available to ban.");
+		return PLUGIN_HANDLED;
+	}
 
-    // Try userid
-    new userid = str_to_num(target);
-    if (userid > 0) {
-        new id = find_player("i", userid);
-        if (id > 0) return id;
-    }
+	// Show player selection menu
+	g_menuAction[id] = ACTION_BAN;
+	g_menuPage[id] = 0;
+	show_player_menu(id);
 
-    // Try authid
-    for (new i = 0; i < pnum; i++) {
-        new id = players[i];
-        new authid[44];
-        get_user_authid(id, authid, charsmax(authid));
-        if (equal(authid, target)) {
-            return id;
-        }
-    }
-
-    return 0;  // Not found
+	return PLUGIN_HANDLED;
 }
 
-// ================= Discord Integration =================
-stock load_discord_config() {
-    // Reset to defaults
-    g_discordRelayUrl[0] = 0;
-    g_discordChannelId[0] = 0;
-    g_discordAuthSecret[0] = 0;
-    g_auditChannelCount = 0;
-    for (new i = 0; i < MAX_AUDIT_CHANNELS; i++) {
-        g_auditChannels[i][0] = 0;
-    }
+// ===========================================================================
+// Player List Building
+// ===========================================================================
 
-    new path[192];
-    get_pcvar_string(g_cvarDiscordIni, path, charsmax(path));
-    if (!path[0]) {
-        // Use get_configsdir() for proper path resolution
-        new configsDir[128];
-        get_configsdir(configsDir, charsmax(configsDir));
-        formatex(path, charsmax(path), "%s/discord.ini", configsDir);
-    }
+build_player_list(admin_id, bool:checkImmunity)
+{
+	new players[32], num;
+	get_players(players, num, "ch");  // connected, not HLTV
 
-    new fp = fopen(path, "rt");
-    if (!fp) {
-        log_amx("[KTP Admin Audit] Discord config not found: %s", path);
-        return;
-    }
+	g_validPlayerCount[admin_id] = 0;
 
-    new line[256], key[64], val[192];
-    new loaded = 0;
+	for (new i = 0; i < num; i++)
+	{
+		new pid = players[i];
 
-    while (!feof(fp)) {
-        fgets(fp, line, charsmax(line));
-        trim(line);
-        if (!line[0] || line[0] == ';' || line[0] == '#') continue;
+		// Skip self
+		if (pid == admin_id)
+			continue;
 
-        new eq = contain(line, "=");
-        if (eq <= 0) continue;
+		// Skip bots
+		if (is_user_bot(pid))
+			continue;
 
-        copy(key, min(eq, charsmax(key)), line);
-        trim(key);
-        for (new k = 0; key[k]; k++) key[k] = tolower(key[k]);
+		// Check immunity if enabled
+		if (checkImmunity && (get_user_flags(pid) & ADMIN_IMMUNITY))
+			continue;
 
-        copy(val, charsmax(val), line[eq + 1]);
-        trim(val);
+		g_validPlayers[admin_id][g_validPlayerCount[admin_id]] = pid;
+		g_validPlayerCount[admin_id]++;
+	}
 
-        if (!key[0] || !val[0]) continue;
-
-        // Parse Discord config keys
-        if (equal(key, "discord_relay_url")) {
-            copy(g_discordRelayUrl, charsmax(g_discordRelayUrl), val);
-            loaded++;
-        } else if (equal(key, "discord_channel_id")) {
-            copy(g_discordChannelId, charsmax(g_discordChannelId), val);
-            loaded++;
-        } else if (equal(key, "discord_auth_secret")) {
-            copy(g_discordAuthSecret, charsmax(g_discordAuthSecret), val);
-            loaded++;
-        }
-        // Collect ALL audit channel configurations
-        else if (containi(key, "discord_channel_id_audit") != -1 || equal(key, "discord_channel_id_admin")) {
-            if (g_auditChannelCount < MAX_AUDIT_CHANNELS) {
-                copy(g_auditChannels[g_auditChannelCount], 63, val);
-                log_amx("[KTP Admin Audit] Registered audit channel #%d from key '%s': %s",
-                    g_auditChannelCount + 1, key, val);
-                g_auditChannelCount++;
-                loaded++;
-            }
-        }
-    }
-    fclose(fp);
-
-    log_amx("[KTP Admin Audit] Discord config loaded: %d keys, %d audit channels from %s",
-        loaded, g_auditChannelCount, path);
+	return g_validPlayerCount[admin_id];
 }
 
-#if defined HAS_CURL
-stock send_kick_to_discord(const adminName[], const adminAuthId[], const adminIp[],
-                            const targetName[], const targetAuthId[], const targetIp[],
-                            const reason[]) {
-    // Check if Discord is configured
-    if (!g_discordRelayUrl[0] || g_auditChannelCount == 0 || !g_discordAuthSecret[0]) {
-        log_amx("[KTP Admin Audit] Discord not configured or no audit channels (channels: %d)", g_auditChannelCount);
-        return;
-    }
+// ===========================================================================
+// Player Selection Menu
+// ===========================================================================
 
-    // Build message
-    new message[512];
-    formatex(message, charsmax(message),
-        "🚨 **ADMIN ACTION: KICK**\n**Admin:** %s [%s | %s]\n**Target:** %s [%s | %s]\n**Reason:** %s\n**Server:** %s",
-        adminName, adminAuthId, adminIp,
-        targetName, targetAuthId, targetIp,
-        reason,
-        g_serverHostname);
+show_player_menu(id)
+{
+	new menu[512], len = 0;
+	new title[64];
 
-    // Escape special characters for JSON
-    new escapedMsg[768];
-    new msgLen = strlen(message);
-    new j = 0;
-    for (new i = 0; i < msgLen; i++) {
-        if (j >= charsmax(escapedMsg) - 2) break;
+	if (g_menuAction[id] == ACTION_KICK)
+		copy(title, charsmax(title), "Select player to KICK:");
+	else
+		copy(title, charsmax(title), "Select player to BAN:");
 
-        switch (message[i]) {
-            case '"': { escapedMsg[j++] = 92; escapedMsg[j++] = '"'; }
-            case 92: { escapedMsg[j++] = 92; escapedMsg[j++] = 92; }
-            case 10: { escapedMsg[j++] = 92; escapedMsg[j++] = 'n'; }
-            case 13: { escapedMsg[j++] = 92; escapedMsg[j++] = 'r'; }
-            case 9: { escapedMsg[j++] = 92; escapedMsg[j++] = 't'; }
-            default: {
-                if (message[i] >= 32 || message[i] == 10 || message[i] == 13 || message[i] == 9) {
-                    escapedMsg[j++] = message[i];
-                }
-            }
-        }
-    }
-    escapedMsg[j] = 0;
+	len = formatex(menu, charsmax(menu), "\y%s^n^n", title);
 
-    // Send to ALL configured audit channels
-    for (new c = 0; c < g_auditChannelCount; c++) {
-        if (!g_auditChannels[c][0]) continue;
+	// Pagination
+	new startIdx = g_menuPage[id] * 7;
+	new endIdx = min(startIdx + 7, g_validPlayerCount[id]);
+	new totalPages = (g_validPlayerCount[id] + 6) / 7;
 
-        // Build JSON payload for this channel
-        new payload[1024];
-        formatex(payload, charsmax(payload),
-            "{^"channelId^":^"%s^",^"content^":^"%s^"}",
-            g_auditChannels[c], escapedMsg);
+	// Add players
+	new itemNum = 0;
+	for (new i = startIdx; i < endIdx; i++)
+	{
+		new pid = g_validPlayers[id][i];
+		new playerName[32];
+		get_user_name(pid, playerName, charsmax(playerName));
 
-        // Create cURL handle
-        new CURL:curl = curl_easy_init();
-        if (curl) {
-            curl_easy_setopt(curl, CURLOPT_URL, g_discordRelayUrl);
-            curl_easy_setopt(curl, CURLOPT_POST, 1);
-            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload);
-            curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10);
+		itemNum++;
+		len += formatex(menu[len], charsmax(menu) - len, "\r%d.\w %s^n", itemNum, playerName);
+	}
 
-            // Set headers
-            new CURLHeaders:headers = curl_slist_append("Content-Type: application/json");
-            new authHeader[192];
-            formatex(authHeader, charsmax(authHeader), "X-Relay-Auth: %s", g_discordAuthSecret);
-            headers = curl_slist_append(headers, authHeader);
-            curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	// Padding for unused slots
+	while (itemNum < 7)
+	{
+		len += formatex(menu[len], charsmax(menu) - len, "^n");
+		itemNum++;
+	}
 
-            // Perform request
-            curl_easy_perform(curl, "audit_discord_callback");
+	// Navigation
+	if (endIdx < g_validPlayerCount[id])
+		len += formatex(menu[len], charsmax(menu) - len, "^n\r8.\w Next Page");
+	else
+		len += formatex(menu[len], charsmax(menu) - len, "^n\d8. Next Page");
 
-            log_amx("[KTP Admin Audit] Sent kick notification to audit channel #%d: %s", c + 1, g_auditChannels[c]);
-        }
-    }
+	if (g_menuPage[id] > 0)
+		len += formatex(menu[len], charsmax(menu) - len, "^n\r9.\w Previous Page");
+	else
+		len += formatex(menu[len], charsmax(menu) - len, "^n\d9. Previous Page");
+
+	len += formatex(menu[len], charsmax(menu) - len, "^n^n\r0.\w Cancel");
+
+	// Page indicator
+	if (totalPages > 1)
+		len += formatex(menu[len], charsmax(menu) - len, " \d(Page %d/%d)", g_menuPage[id] + 1, totalPages);
+
+	new menuName[32];
+	if (g_menuAction[id] == ACTION_KICK)
+		copy(menuName, charsmax(menuName), "KTP Kick Menu");
+	else
+		copy(menuName, charsmax(menuName), "KTP Ban Menu");
+
+	show_menu(id, 1023, menu, -1, menuName);
 }
 
-public audit_discord_callback(CURL:curl, CURLcode:code) {
-    if (code != CURLE_OK) {
-        new error[128];
-        curl_easy_strerror(code, error, charsmax(error));
-        log_amx("[KTP Admin Audit] Discord error: %s", error);
-    }
-    curl_easy_cleanup(curl);
+public menu_player_handler(id, key)
+{
+	// Cancel
+	if (key == 9)
+	{
+		g_menuAction[id] = ACTION_NONE;
+		return PLUGIN_HANDLED;
+	}
+
+	// Next page
+	if (key == 7)
+	{
+		new maxPage = (g_validPlayerCount[id] - 1) / 7;
+		if (g_menuPage[id] < maxPage)
+		{
+			g_menuPage[id]++;
+			show_player_menu(id);
+		}
+		else
+		{
+			show_player_menu(id);  // Stay on current page
+		}
+		return PLUGIN_HANDLED;
+	}
+
+	// Previous page
+	if (key == 8)
+	{
+		if (g_menuPage[id] > 0)
+		{
+			g_menuPage[id]--;
+		}
+		show_player_menu(id);
+		return PLUGIN_HANDLED;
+	}
+
+	// Player selection (keys 0-6 = items 1-7)
+	new playerIndex = g_menuPage[id] * 7 + key;
+
+	if (playerIndex >= g_validPlayerCount[id])
+	{
+		show_player_menu(id);  // Invalid selection, redisplay
+		return PLUGIN_HANDLED;
+	}
+
+	new target = g_validPlayers[id][playerIndex];
+
+	// Verify target is still valid
+	if (!is_user_connected(target))
+	{
+		client_print(id, print_chat, "[KTP] Player is no longer connected.");
+		g_menuAction[id] = ACTION_NONE;
+		return PLUGIN_HANDLED;
+	}
+
+	// Double-check immunity
+	if (get_user_flags(target) & ADMIN_IMMUNITY)
+	{
+		client_print(id, print_chat, "[KTP] That player has admin immunity.");
+		g_menuAction[id] = ACTION_NONE;
+		return PLUGIN_HANDLED;
+	}
+
+	g_menuTarget[id] = target;
+
+	if (g_menuAction[id] == ACTION_KICK)
+	{
+		// Execute kick directly
+		execute_kick(id, target);
+	}
+	else if (g_menuAction[id] == ACTION_BAN)
+	{
+		// Show ban duration menu
+		show_duration_menu(id);
+	}
+
+	return PLUGIN_HANDLED;
 }
-#endif
+
+// ===========================================================================
+// Ban Duration Menu
+// ===========================================================================
+
+show_duration_menu(id)
+{
+	new menu[256], len = 0;
+	new targetName[32];
+	get_user_name(g_menuTarget[id], targetName, charsmax(targetName));
+
+	len = formatex(menu, charsmax(menu), "\yBan Duration for %s:^n^n", targetName);
+
+	for (new i = 0; i < sizeof(g_banDurations); i++)
+	{
+		len += formatex(menu[len], charsmax(menu) - len, "\r%d.\w %s^n", i + 1, g_banDurationNames[i]);
+	}
+
+	len += formatex(menu[len], charsmax(menu) - len, "^n^n\r0.\w Cancel");
+
+	show_menu(id, 1023, menu, -1, "KTP Ban Duration");
+}
+
+public menu_duration_handler(id, key)
+{
+	// Cancel
+	if (key == 9)
+	{
+		g_menuAction[id] = ACTION_NONE;
+		return PLUGIN_HANDLED;
+	}
+
+	// Duration selection
+	if (key >= 0 && key < sizeof(g_banDurations))
+	{
+		new target = g_menuTarget[id];
+
+		// Verify target is still valid
+		if (!is_user_connected(target))
+		{
+			client_print(id, print_chat, "[KTP] Player is no longer connected.");
+			g_menuAction[id] = ACTION_NONE;
+			return PLUGIN_HANDLED;
+		}
+
+		execute_ban(id, target, g_banDurations[key]);
+	}
+
+	g_menuAction[id] = ACTION_NONE;
+	return PLUGIN_HANDLED;
+}
+
+// ===========================================================================
+// Execute Kick
+// ===========================================================================
+
+execute_kick(admin_id, target_id)
+{
+	new adminName[32], targetName[32], adminAuth[35], targetAuth[35];
+	new adminIP[22], targetIP[22];
+
+	get_user_name(admin_id, adminName, charsmax(adminName));
+	get_user_name(target_id, targetName, charsmax(targetName));
+	get_user_authid(admin_id, adminAuth, charsmax(adminAuth));
+	get_user_authid(target_id, targetAuth, charsmax(targetAuth));
+	get_user_ip(admin_id, adminIP, charsmax(adminIP), 1);
+	get_user_ip(target_id, targetIP, charsmax(targetIP), 1);
+
+	// Log to server
+	log_amx("[KTP] KICK: Admin '%s' <%s> (%s) kicked '%s' <%s> (%s)",
+		adminName, adminAuth, adminIP,
+		targetName, targetAuth, targetIP);
+
+	// Send to Discord audit channels
+	new description[256];
+	formatex(description, charsmax(description),
+		"**Admin:** %s (`%s`)^n**Target:** %s (`%s`)",
+		adminName, adminAuth, targetName, targetAuth);
+	ktp_discord_send_embed_audit("Admin KICK", description, KTP_DISCORD_COLOR_ORANGE);
+
+	// Notify players
+	client_print(0, print_chat, "[KTP] %s was kicked by admin %s.", targetName, adminName);
+
+	// Execute the kick using ReHLDS DropClient API (bypasses blocked kick command)
+	ktp_drop_client(target_id, "Kicked by admin");
+
+	g_menuAction[admin_id] = ACTION_NONE;
+}
+
+// ===========================================================================
+// Execute Ban
+// ===========================================================================
+
+execute_ban(admin_id, target_id, duration)
+{
+	new adminName[32], targetName[32], adminAuth[35], targetAuth[35];
+	new adminIP[22], targetIP[22];
+
+	get_user_name(admin_id, adminName, charsmax(adminName));
+	get_user_name(target_id, targetName, charsmax(targetName));
+	get_user_authid(admin_id, adminAuth, charsmax(adminAuth));
+	get_user_authid(target_id, targetAuth, charsmax(targetAuth));
+	get_user_ip(admin_id, adminIP, charsmax(adminIP), 1);
+	get_user_ip(target_id, targetIP, charsmax(targetIP), 1);
+
+	new durationStr[32];
+	if (duration == 0)
+	{
+		copy(durationStr, charsmax(durationStr), "permanent");
+	}
+	else if (duration < 60)
+	{
+		formatex(durationStr, charsmax(durationStr), "%d minute%s", duration, duration == 1 ? "" : "s");
+	}
+	else if (duration < 1440)
+	{
+		new hours = duration / 60;
+		formatex(durationStr, charsmax(durationStr), "%d hour%s", hours, hours == 1 ? "" : "s");
+	}
+	else
+	{
+		new days = duration / 1440;
+		formatex(durationStr, charsmax(durationStr), "%d day%s", days, days == 1 ? "" : "s");
+	}
+
+	// Log to server
+	log_amx("[KTP] BAN: Admin '%s' <%s> (%s) banned '%s' <%s> (%s) for %s",
+		adminName, adminAuth, adminIP,
+		targetName, targetAuth, targetIP,
+		durationStr);
+
+	// Send to Discord audit channels
+	new description[256];
+	formatex(description, charsmax(description),
+		"**Admin:** %s (`%s`)^n**Target:** %s (`%s`)^n**Duration:** %s",
+		adminName, adminAuth, targetName, targetAuth, durationStr);
+	ktp_discord_send_embed_audit("Admin BAN", description, KTP_DISCORD_COLOR_RED);
+
+	// Notify players
+	client_print(0, print_chat, "[KTP] %s was banned by admin %s (%s).", targetName, adminName, durationStr);
+
+	// Execute the ban using SteamID (without kick - kick command is blocked)
+	server_cmd("banid %d %s", duration, targetAuth);
+	server_cmd("writeid");
+
+	// Drop the client using ReHLDS DropClient API (bypasses blocked kick command)
+	new banReason[64];
+	formatex(banReason, charsmax(banReason), "Banned by admin (%s)", durationStr);
+	ktp_drop_client(target_id, banReason);
+
+	g_menuAction[admin_id] = ACTION_NONE;
+}
+
+// ===========================================================================
+// Failed Attempt Logging
+// ===========================================================================
+
+log_failed_attempt(id, const action[])
+{
+	new name[32], auth[35], ip[22];
+	get_user_name(id, name, charsmax(name));
+	get_user_authid(id, auth, charsmax(auth));
+	get_user_ip(id, ip, charsmax(ip), 1);
+
+	log_amx("[KTP] DENIED: '%s' <%s> (%s) attempted .%s without permission", name, auth, ip, action);
+}
