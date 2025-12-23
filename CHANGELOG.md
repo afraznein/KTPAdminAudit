@@ -40,6 +40,12 @@ All notable changes to KTP Admin Audit will be documented in this file.
 - Prevents remote/untraceable kicks via HLSW or RCON
 - Full audit trail: admin name, SteamID, IP, target details, action
 
+## [1.3.0] - 2025-12-20
+
+### Changed
+- Now uses `ktp_discord.inc` for shared Discord configuration loading
+- Unified Discord integration with other KTP plugins
+
 ## [1.2.0] - 2025-12-03
 
 ### Fixed

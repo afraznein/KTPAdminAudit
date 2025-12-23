@@ -43,6 +43,8 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 |---------|------------|-------------|
 | `.kick` or `/kick` | ADMIN_KICK (c) | Open kick menu |
 | `.ban` or `/ban` | ADMIN_BAN (d) | Open ban menu |
+| `ktp_kick` | ADMIN_KICK (c) | Console command for kick menu |
+| `ktp_ban` | ADMIN_BAN (d) | Console command for ban menu |
 
 ## Admin Flags
 

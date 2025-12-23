@@ -4,7 +4,7 @@
  * AUTHOR: Nein_
  * VERSION: 2.1.0
  * DATE: 2025-12-21
- * GITHUB: https://github.com/KTP-Community/KTPAdminAudit
+ * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
  * Provides secure, auditable kick and ban functionality. Unlike RCON-based
