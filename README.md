@@ -1,8 +1,8 @@
 # KTP Admin Audit Plugin
 
-**Version:** 2.1.0
+**Version:** 2.2.0
 **Author:** Nein_
-**Date:** December 21, 2025
+**Date:** December 23, 2025
 
 ## Overview
 
@@ -17,13 +17,15 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 - **Immunity Protection** - Players with ADMIN_IMMUNITY (a) cannot be kicked/banned
 - **Ban Duration Selection** - 1 hour, 1 day, 1 week, or permanent
 - **Discord Audit Logging** - Real-time notifications to configured channels
+- **RCON Audit Logging** - Logs quit/restart commands with source IP (v2.2.0+)
 - **ReHLDS Integration** - Uses `ktp_drop_client` native to bypass blocked kick command
 - **Full Accountability** - Logs admin name, SteamID, IP, target details
 
 ## Requirements
 
-- **KTP AMX 2.5+** (or AMX Mod X 1.9+ with limitations)
-- **KTP ReHLDS** (recommended - kick/ban commands blocked at engine level)
+- **KTP AMX 2.6+** (for ktp_discord.inc curl module)
+- **KTP ReHLDS 3.20+** (for RH_SV_Rcon hook - RCON audit)
+- **KTP ReAPI 5.29+** (for RH_SV_Rcon hookchain registration)
 - **ktp_discord.inc** (shared Discord integration)
 
 ## Installation
