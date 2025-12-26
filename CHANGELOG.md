@@ -2,6 +2,18 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.2.0] - 2025-12-23
+
+### Added
+- **RCON Audit Logging** - Server control commands logged via RH_SV_Rcon hook
+  - Logs `quit`, `exit`, `restart`, `_restart` RCON commands
+  - Discord notifications to all audit channels
+  - Shows command and source IP for accountability
+
+### Requirements
+- KTP-ReHLDS with SV_Rcon hook support
+- KTP-ReAPI v5.29.0.361-ktp+ with RH_SV_Rcon hookchain
+
 ## [2.1.0] - 2025-12-21
 
 ### Changed

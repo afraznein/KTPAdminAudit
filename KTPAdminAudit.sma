@@ -46,6 +46,11 @@
  *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.2.0 (2025-12-23) - RCON Audit Logging
+ *   + ADDED: RCON quit/exit/restart command logging via RH_SV_Rcon hook
+ *   + ADDED: Discord notifications for server control commands
+ *   * REQUIRES: KTP-ReHLDS and KTP-ReAPI with SV_Rcon hook support
+ *
  * v2.1.0 (2025-12-21) - ReHLDS DropClient Integration
  *   * CHANGED: Uses ktp_drop_client native instead of server_cmd("kick")
  *   * CHANGED: Works with ReHLDS where kick command is blocked at engine level
@@ -79,6 +84,7 @@
 #include <amxmodx>
 #include <amxmisc>
 #include <ktp_discord>
+#include <reapi>
 
 #pragma semicolon 1
 
@@ -86,7 +92,7 @@
 native ktp_drop_client(id, const reason[] = "");
 
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "2.1.0"
+#define VERSION "2.2.0"
 #define AUTHOR "Nein_"
 
 // Menu action constants
@@ -127,6 +133,9 @@ public plugin_init()
 	register_menucmd(register_menuid("KTP Kick Menu"), 1023, "menu_player_handler");
 	register_menucmd(register_menuid("KTP Ban Menu"), 1023, "menu_player_handler");
 	register_menucmd(register_menuid("KTP Ban Duration"), 1023, "menu_duration_handler");
+
+	// Register RCON audit hook (KTP-ReHLDS/KTP-ReAPI)
+	RegisterHookChain(RH_SV_Rcon, "hook_SV_Rcon", false);
 
 	log_amx("[%s] v%s initialized", PLUGIN, VERSION);
 }
@@ -567,4 +576,41 @@ log_failed_attempt(id, const action[])
 	get_user_ip(id, ip, charsmax(ip), 1);
 
 	log_amx("[KTP] DENIED: '%s' <%s> (%s) attempted .%s without permission", name, auth, ip, action);
+}
+
+// ===========================================================================
+// RCON Audit Logging (KTP-ReHLDS hook)
+// ===========================================================================
+
+public hook_SV_Rcon(const command[], const from_ip[], bool:is_valid)
+{
+	// Only log valid RCON commands (invalid ones are already logged by engine)
+	if (!is_valid)
+		return HC_CONTINUE;
+
+	// Check for server control commands that we want to audit
+	new cmd[32];
+	copy(cmd, charsmax(cmd), command);
+	trim(cmd);
+
+	// Extract first word (the actual command)
+	new space = contain(cmd, " ");
+	if (space != -1)
+		cmd[space] = 0;
+
+	// Log quit/exit/restart commands to Discord
+	if (equal(cmd, "quit") || equal(cmd, "exit") || equal(cmd, "restart") || equal(cmd, "_restart"))
+	{
+		// Log to server
+		log_amx("[KTP] RCON: '%s' from %s", command, from_ip);
+
+		// Send to Discord audit channels
+		new description[256];
+		formatex(description, charsmax(description),
+			"**Command:** `%s`^n**Source IP:** %s",
+			command, from_ip);
+		ktp_discord_send_embed_audit("RCON Server Control", description, KTP_DISCORD_COLOR_ORANGE);
+	}
+
+	return HC_CONTINUE;
 }
