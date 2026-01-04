@@ -1,23 +1,27 @@
 # KTP Admin Audit Plugin
 
-**Version:** 2.2.0
+**Version:** 2.6.0
 **Author:** Nein_
-**Date:** December 23, 2025
+**Date:** January 2026
 
 ## Overview
 
-KTP Admin Audit provides secure, menu-based kick and ban functionality with full Discord audit logging. Unlike RCON-based commands, this plugin requires admins to be **connected to the server** and logs all actions for accountability.
+KTP Admin Audit provides secure, menu-based admin commands (kick, ban, changemap) with full Discord audit logging. Unlike RCON-based commands, this plugin requires admins to be **connected to the server** and logs all actions for accountability.
 
 Designed to work with KTP ReHLDS where kick/ban console commands are blocked at the engine level, ensuring all player removals go through this audited system.
 
 ## Features
 
 - **Menu-Based Kick/Ban** - Interactive player selection menus
-- **Admin Flag Permissions** - Requires ADMIN_KICK (c) or ADMIN_BAN (d) flags
+- **Menu-Based Map Change** - Map selection from ktp_maps.ini (v2.4.0+)
+- **Admin Flag Permissions** - Requires ADMIN_KICK (c), ADMIN_BAN (d), or ADMIN_MAP (f) flags
 - **Immunity Protection** - Players with ADMIN_IMMUNITY (a) cannot be kicked/banned
 - **Ban Duration Selection** - 1 hour, 1 day, 1 week, or permanent
 - **Discord Audit Logging** - Real-time notifications to configured channels
 - **RCON Audit Logging** - Logs quit/restart commands with source IP (v2.2.0+)
+- **Console Command Audit** - Catches all console commands including LinuxGSM (v2.3.0+)
+- **Admin Server Commands** - `.restart` / `.quit` with ADMIN_RCON flag (v2.3.0+)
+- **HLTV Kick Support** - HLTV proxies appear in kick menu (v2.3.0+)
 - **ReHLDS Integration** - Uses `ktp_drop_client` native to bypass blocked kick command
 - **Full Accountability** - Logs admin name, SteamID, IP, target details
 
@@ -45,8 +49,12 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 |---------|------------|-------------|
 | `.kick` or `/kick` | ADMIN_KICK (c) | Open kick menu |
 | `.ban` or `/ban` | ADMIN_BAN (d) | Open ban menu |
+| `.changemap` or `/changemap` | ADMIN_MAP (f) | Open map selection menu |
+| `.restart` or `/restart` | ADMIN_RCON (l) | Restart server |
+| `.quit` or `/quit` | ADMIN_RCON (l) | Shutdown server |
 | `ktp_kick` | ADMIN_KICK (c) | Console command for kick menu |
 | `ktp_ban` | ADMIN_BAN (d) | Console command for ban menu |
+| `ktp_changemap` | ADMIN_MAP (f) | Console command for map menu |
 
 ## Admin Flags
 
@@ -55,18 +63,23 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 | `a` | ADMIN_IMMUNITY | Protected from kick/ban |
 | `c` | ADMIN_KICK | Can kick players |
 | `d` | ADMIN_BAN | Can ban players |
+| `f` | ADMIN_MAP | Can change maps |
+| `l` | ADMIN_RCON | Can use .restart / .quit commands |
 
 ### Example users.ini
 
 ```ini
-; Full admin with kick and ban
-"STEAM_0:1:12345678" "" "cd" "ce"
+; Full admin with kick, ban, and changemap
+"STEAM_0:1:12345678" "" "cdf" "ce"
+
+; Full admin with server restart/quit
+"STEAM_0:1:12345678" "" "cdfl" "ce"
 
 ; Kick-only admin
 "STEAM_0:1:87654321" "" "c" "ce"
 
 ; Admin with immunity (cannot be kicked/banned by others)
-"STEAM_0:0:11111111" "" "acd" "ce"
+"STEAM_0:0:11111111" "" "acdfl" "ce"
 ```
 
 **Connection Flags:**

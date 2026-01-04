@@ -2,6 +2,48 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.6.0] - 2026-01
+
+### Changed
+- Version bump for live server deployment
+- Tested with KTPMatchHandler v0.10.30 and KTP-ReHLDS 3.20
+
+## [2.4.0] - 2025-12-29
+
+### Added
+- **Map Change Command** - `.changemap` / `/changemap` menu-based map selection
+  - Maps loaded from `ktp_maps.ini` (shared with KTPMatchHandler)
+  - Shows display name with actual map filename in parentheses
+  - Requires ADMIN_MAP flag ("f")
+  - Discord audit logging with from/to map names
+- `ktp_changemap` console command for map menu access
+
+### Notes
+- ADMIN_MAP is flag "f" (not "g" as sometimes documented)
+
+## [2.3.1] - 2025-12-29
+
+### Fixed
+- Skip logging `_restart` in ExecuteServerStringCmd hook (already logged by admin command)
+- Skip RCON source in ExecuteServerStringCmd hook (already caught by RH_SV_Rcon)
+
+## [2.3.0] - 2025-12-29
+
+### Added
+- **Console Command Audit** - RH_ExecuteServerStringCmd hook to audit ALL console commands
+  - Catches quit/restart commands from LinuxGSM (via tmux), not just RCON
+  - Logs source type (Console, RCON, Redirect) to Discord
+- **Admin Server Control Commands** - `.restart` and `.quit` say commands
+  - Requires ADMIN_RCON flag ("l")
+  - Full Discord audit logging with admin name and SteamID
+  - 1-second delay for Discord message before execution
+- **HLTV Kick Support** - HLTV proxies now appear in `.kick` player menu
+  - Changed get_players filter from "ch" to "c" to include HLTV
+
+### Requirements
+- KTP-ReHLDS with RH_ExecuteServerStringCmd hook support
+- KTP-ReAPI v5.29.0.361-ktp+ with ExecuteServerStringCmd hookchain
+
 ## [2.2.0] - 2025-12-23
 
 ### Added
