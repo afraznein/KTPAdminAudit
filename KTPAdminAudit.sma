@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.6.0
+/* KTP Admin Audit v2.7.1
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.6.0
- * DATE: 2026-01-01
+ * VERSION: 2.7.1
+ * DATE: 2026-01-11
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -50,6 +50,12 @@
  *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.7.1 (2026-01-11) - Block RCON Quit/Exit
+ *   + ADDED: RCON quit/exit commands now BLOCKED (returns HC_SUPERCEDE)
+ *   + ADDED: Discord alert when RCON quit/exit is blocked (shows source IP)
+ *   * SECURITY: Prevents anonymous server shutdowns via RCON
+ *   * NOTE: Use .quit in-game for audited server shutdown
+ *
  * v2.6.0 (2026-01-01) - Changelevel Hook with Countdown
  *   + ADDED: RH_Host_Changelevel_f hook for .changemap (KTP-ReHLDS)
  *   + ADDED: 5-second countdown before map change with HUD display
@@ -130,7 +136,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "2.6.0"
+#define VERSION "2.7.1"
 #define AUTHOR "Nein_"
 
 // Menu action constants
@@ -567,7 +573,7 @@ execute_kick(admin_id, target_id)
 	formatex(description, charsmax(description),
 		"**Admin:** %s (`%s`)^n**Target:** %s (`%s`)",
 		adminName, adminAuth, targetName, targetAuth);
-	ktp_discord_send_embed_audit("Admin KICK", description, KTP_DISCORD_COLOR_ORANGE);
+	ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Admin KICK", description, KTP_DISCORD_COLOR_ORANGE);
 
 	// Notify players
 	client_print(0, print_chat, "[KTP] %s was kicked by admin %s.", targetName, adminName);
@@ -625,7 +631,7 @@ execute_ban(admin_id, target_id, duration)
 	formatex(description, charsmax(description),
 		"**Admin:** %s (`%s`)^n**Target:** %s (`%s`)^n**Duration:** %s",
 		adminName, adminAuth, targetName, targetAuth, durationStr);
-	ktp_discord_send_embed_audit("Admin BAN", description, KTP_DISCORD_COLOR_RED);
+	ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Admin BAN", description, KTP_DISCORD_COLOR_RED);
 
 	// Notify players
 	client_print(0, print_chat, "[KTP] %s was banned by admin %s (%s).", targetName, adminName, durationStr);
@@ -662,11 +668,11 @@ log_failed_attempt(id, const action[])
 
 public hook_SV_Rcon(const command[], const from_ip[], bool:is_valid)
 {
-	// Only log valid RCON commands (invalid ones are already logged by engine)
+	// Only process valid RCON commands (invalid ones are already logged by engine)
 	if (!is_valid)
 		return HC_CONTINUE;
 
-	// Check for server control commands that we want to audit
+	// Check for server control commands that we want to audit/block
 	new cmd[32];
 	copy(cmd, charsmax(cmd), command);
 	trim(cmd);
@@ -676,18 +682,33 @@ public hook_SV_Rcon(const command[], const from_ip[], bool:is_valid)
 	if (space != -1)
 		cmd[space] = 0;
 
-	// Log quit/exit/restart commands to Discord
-	if (equal(cmd, "quit") || equal(cmd, "exit") || equal(cmd, "restart") || equal(cmd, "_restart"))
+	// BLOCK quit/exit commands via RCON - force use of .quit menu for accountability
+	// These commands execute immediately and kill the server before Discord logging can complete
+	if (equal(cmd, "quit") || equal(cmd, "exit"))
 	{
-		// Log to server
+		// Log the blocked attempt
+		log_amx("[KTP] BLOCKED RCON quit/exit from %s - use .quit command in-game", from_ip);
+
+		// Send alert to Discord (this will complete since we're blocking the quit)
+		new description[256];
+		formatex(description, charsmax(description),
+			"**Blocked Command:** `%s`^n**Source IP:** %s^n^n*RCON quit/exit is disabled. Use `.quit` in-game.*",
+			command, from_ip);
+		ktp_discord_send_embed_audit("<:ktp:1105490705188659272> RCON Quit BLOCKED", description, KTP_DISCORD_COLOR_RED);
+
+		return HC_SUPERCEDE;  // Block the command
+	}
+
+	// Log restart commands (these don't kill server immediately)
+	if (equal(cmd, "restart") || equal(cmd, "_restart"))
+	{
 		log_amx("[KTP] RCON: '%s' from %s", command, from_ip);
 
-		// Send to Discord audit channels
 		new description[256];
 		formatex(description, charsmax(description),
 			"**Command:** `%s`^n**Source IP:** %s",
 			command, from_ip);
-		ktp_discord_send_embed_audit("RCON Server Control", description, KTP_DISCORD_COLOR_ORANGE);
+		ktp_discord_send_embed_audit("<:ktp:1105490705188659272> RCON Server Control", description, KTP_DISCORD_COLOR_ORANGE);
 	}
 
 	return HC_CONTINUE;
@@ -734,7 +755,7 @@ public hook_ExecuteServerStringCmd(const cmd[], source, id)
 		formatex(description, charsmax(description),
 			"**Command:** `%s`^n**Source:** %s",
 			cmd, sourceStr);
-		ktp_discord_send_embed_audit("Console Server Control", description, KTP_DISCORD_COLOR_ORANGE);
+		ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Console Server Control", description, KTP_DISCORD_COLOR_ORANGE);
 	}
 
 	return HC_CONTINUE;
@@ -766,7 +787,7 @@ public cmd_restart(id)
 	formatex(description, charsmax(description),
 		"**Admin:** %s (`%s`)^n**Action:** Server Restart",
 		adminName, adminAuth);
-	ktp_discord_send_embed_audit("Admin Server Restart", description, KTP_DISCORD_COLOR_ORANGE);
+	ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Admin Server Restart", description, KTP_DISCORD_COLOR_ORANGE);
 
 	// Notify players
 	client_print(0, print_chat, "[KTP] Server restart initiated by admin %s.", adminName);
@@ -808,7 +829,7 @@ public cmd_quit(id)
 	formatex(description, charsmax(description),
 		"**Admin:** %s (`%s`)^n**Action:** Server Shutdown^n_Server may take up to 60 seconds to restart._",
 		adminName, adminAuth);
-	ktp_discord_send_embed_audit("Admin Server Shutdown", description, KTP_DISCORD_COLOR_RED);
+	ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Admin Server Shutdown", description, KTP_DISCORD_COLOR_RED);
 
 	// Notify players
 	client_print(0, print_chat, "[KTP] Server shutdown initiated by admin %s.", adminName);
@@ -1063,7 +1084,7 @@ execute_changemap(admin_id, const mapName[], const displayName[])
 	formatex(description, charsmax(description),
 		"**Admin:** %s (`%s`)^n**From:** %s^n**To:** %s (`%s`)",
 		adminName, adminAuth, currentMap, displayName, mapName);
-	ktp_discord_send_embed_audit("Admin Map Change", description, KTP_DISCORD_COLOR_ORANGE);
+	ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Admin Map Change", description, KTP_DISCORD_COLOR_ORANGE);
 
 	// Notify players
 	client_print(0, print_chat, "[KTP] Map changing to %s in %d seconds (admin: %s)",

@@ -2,11 +2,46 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
-## [2.6.0] - 2026-01
+## [2.7.1] - 2026-01-11
+
+### Added
+- **RCON quit/exit commands now BLOCKED** - Returns HC_SUPERCEDE to prevent anonymous server shutdowns
+- **Discord alert when RCON quit/exit is blocked** - Shows source IP for accountability
 
 ### Changed
-- Version bump for live server deployment
-- Tested with KTPMatchHandler v0.10.30 and KTP-ReHLDS 3.20
+- **Discord embed titles now include `:ktp:` emoji** - Consistent branding across all Discord notifications
+  - Admin KICK, Admin BAN, RCON Quit BLOCKED, RCON Server Control
+  - Console Server Control, Admin Server Restart, Admin Server Shutdown, Admin Map Change
+
+### Security
+- RCON quit/exit blocked - use `.quit` in-game for audited server shutdown
+
+## [2.6.0] - 2026-01-01
+
+### Added
+- **Changelevel Hook with Countdown** - `RH_Host_Changelevel_f` hook for `.changemap` (KTP-ReHLDS)
+- **5-second countdown before map change** - HUD display and chat announcements
+- **Chat countdown announcements** - Last 3 seconds shown in chat
+
+### Changed
+- `.changemap` now supersedes engine changelevel to show countdown
+
+### Technical
+- Uses `Host_Changelevel_f` hook (console changelevel command)
+
+## [2.5.1] - 2025-12-31
+
+### Added
+- **Match active check** - Uses `ktp_is_match_active()` native from KTPMatchHandler
+
+### Changed
+- `.changemap` blocked during active matches (live, pending, prestart)
+
+## [2.5.0] - 2025-12-31
+
+### Changed
+- **Changemap for all players** - `.changemap` now available to ALL players (no admin flag required)
+- **Consolidated version announcement** - Single message on admin join
 
 ## [2.4.0] - 2025-12-29
 
