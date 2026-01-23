@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.1
+/* KTP Admin Audit v2.7.2
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.1
- * DATE: 2026-01-11
+ * VERSION: 2.7.2
+ * DATE: 2026-01-20
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -50,6 +50,12 @@
  *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.7.2 (2026-01-20) - Fix Concurrent Changemap Crash
+ *   * FIXED: Server crash when two players use .changemap simultaneously
+ *   + ADDED: g_changeMapInProgress lock to prevent concurrent requests
+ *   + ADDED: Block other changelevel commands during active countdown
+ *   * NOTE: Reported crash on Atlanta 2, January 18 2026
+ *
  * v2.7.1 (2026-01-11) - Block RCON Quit/Exit
  *   + ADDED: RCON quit/exit commands now BLOCKED (returns HC_SUPERCEDE)
  *   + ADDED: Discord alert when RCON quit/exit is blocked (shows source IP)
@@ -136,7 +142,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "2.7.1"
+#define VERSION "2.7.2"
 #define AUTHOR "Nein_"
 
 // Menu action constants
@@ -166,7 +172,8 @@ new const g_banDurationNames[][] = { "1 Hour", "1 Day", "1 Week", "Permanent" };
 new g_pendingChangeMap[64];          // Map to change to after countdown
 new g_changeMapCountdown = 0;        // Countdown seconds remaining
 new g_changeMapTaskId = 54321;       // Task ID for countdown
-new bool:g_changeLevelPending = false;  // Flag to track pending changelevel
+new bool:g_changeLevelPending = false;  // Flag to track pending changelevel (for hook)
+new bool:g_changeMapInProgress = false; // Lock to prevent concurrent .changemap requests
 const CHANGELEVEL_COUNTDOWN_SECS = 5;   // Seconds to wait before map change
 
 public plugin_init()
@@ -947,6 +954,13 @@ public cmd_changemap(id)
 		return PLUGIN_HANDLED;
 	}
 
+	// Block if a changemap is already in progress (prevents race condition crash)
+	if (g_changeMapInProgress)
+	{
+		client_print(id, print_chat, "[KTP] Map change already in progress. Please wait.");
+		return PLUGIN_HANDLED;
+	}
+
 	if (g_mapCount == 0)
 	{
 		client_print(id, print_chat, "[KTP] No maps available. Check ktp_maps.ini.");
@@ -1090,6 +1104,9 @@ execute_changemap(admin_id, const mapName[], const displayName[])
 	client_print(0, print_chat, "[KTP] Map changing to %s in %d seconds (admin: %s)",
 		displayName, CHANGELEVEL_COUNTDOWN_SECS, adminName);
 
+	// Lock to prevent concurrent changemap requests (race condition fix)
+	g_changeMapInProgress = true;
+
 	// Store the pending map for the changelevel hook
 	copy(g_pendingChangeMap, charsmax(g_pendingChangeMap), mapName);
 	g_changeLevelPending = true;
@@ -1114,6 +1131,13 @@ public hook_Host_Changelevel_f(const map[], const startspot[])
 		start_changelevel_countdown();
 
 		// Supersede the engine changelevel - we'll do it manually after countdown
+		return HC_SUPERCEDE;
+	}
+
+	// If a changemap countdown is in progress, block any other changelevel attempts
+	// This prevents race conditions from concurrent .changemap or other sources
+	if (g_changeMapInProgress) {
+		log_amx("[KTP] Blocked changelevel to '%s' - changemap to '%s' already in progress", map, g_pendingChangeMap);
 		return HC_SUPERCEDE;
 	}
 

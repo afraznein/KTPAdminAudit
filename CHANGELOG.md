@@ -2,6 +2,20 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.2] - 2026-01-20
+
+### Fixed
+- **Concurrent changemap crash** - Server crash when two players use `.changemap` simultaneously
+  - Reported on Atlanta 2, January 18 2026
+
+### Added
+- **g_changeMapInProgress lock** - Prevents race condition from concurrent `.changemap` requests
+- **Changelevel blocking during countdown** - Other changelevel attempts blocked while changemap in progress
+
+### Technical
+- Added check in `cmd_changemap` to reject if changemap already in progress
+- Added check in `hook_Host_Changelevel_f` to block other changelevel sources during countdown
+
 ## [2.7.1] - 2026-01-11
 
 ### Added
