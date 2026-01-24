@@ -27,6 +27,7 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 - **Changelevel Countdown** - 5-second HUD countdown before map changes (v2.6.0+)
 - **ReHLDS Integration** - Uses `ktp_drop_client` native to bypass blocked kick command
 - **Full Accountability** - Logs admin name, SteamID, IP, target details
+- **Admin Version Display** - Shows plugin version to admins with KICK/BAN flags on connect
 
 ## Requirements
 
@@ -59,6 +60,8 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 | `ktp_kick` | ADMIN_KICK (c) | Console command for kick menu |
 | `ktp_ban` | ADMIN_BAN (d) | Console command for ban menu |
 | `ktp_changemap` | All players | Console command for map menu |
+
+**Note:** All chat commands also work via team chat (`say_team`).
 
 ## Admin Flags
 
@@ -104,6 +107,8 @@ name = Charlie
 ```
 
 Only maps that exist on the server (verified via `maps/<mapname>.bsp`) are shown in the menu.
+
+**Limits:** Maximum 64 maps can be loaded from ktp_maps.ini.
 
 ### Discord Configuration (`discord.ini`)
 
