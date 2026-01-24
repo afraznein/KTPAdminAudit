@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.2
+/* KTP Admin Audit v2.7.3
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.2
- * DATE: 2026-01-20
+ * VERSION: 2.7.3
+ * DATE: 2026-01-23
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -142,7 +142,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "2.7.2"
+#define VERSION "2.7.3"
 #define AUTHOR "Nein_"
 
 // Menu action constants
@@ -1169,7 +1169,11 @@ public task_changelevel_countdown()
 		// Time's up - execute changelevel
 		remove_task(g_changeMapTaskId);
 
-		// Execute the changelevel (won't be intercepted since g_changeLevelPending is false)
+		// Reset the in-progress flag BEFORE executing changelevel
+		// The hook will still run but will see g_changeMapInProgress = false and allow it
+		g_changeMapInProgress = false;
+
+		// Execute the changelevel
 		server_cmd("changelevel %s", g_pendingChangeMap);
 		return;
 	}

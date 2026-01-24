@@ -2,6 +2,12 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.3] - 2026-01-23
+
+### Fixed
+- **Changemap countdown completion blocked itself** - After 5-second countdown, the changelevel command was blocked by its own race condition protection (`g_changeMapInProgress` still true)
+  - Fix: Reset `g_changeMapInProgress = false` before executing the final changelevel command
+
 ## [2.7.2] - 2026-01-20
 
 ### Fixed
