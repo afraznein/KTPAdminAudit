@@ -175,7 +175,7 @@ Duration: 1 day
 compile.bat
 ```
 
-Uses WSL with KTPAMXX compiler. Output is staged to `N:\Nein_\KTP DoD Server\dod\addons\ktpamx\plugins\`.
+Uses WSL with KTPAMXX compiler. Output is staged to `N:\Nein_\KTP Git Projects\KTP DoD Server\serverfiles\dod\addons\ktpamx\plugins\`.
 
 ## Changelog
 
