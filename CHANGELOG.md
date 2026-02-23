@@ -2,6 +2,16 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.4] - 2026-02-19
+
+### Fixed
+- **Changelevel lock could get permanently stuck** - `g_changeMapInProgress` lock could remain set if the countdown task failed to fire (e.g., plugin reload mid-countdown), blocking ALL future changelevel attempts including mapcycle rotation and manual console commands
+  - Caused 160ms phys spikes on NY 27015 for 3+ hours (2026-02-19) — engine repeatedly attempting blocked changelevel in physics loop
+
+### Added
+- **15-second safety timeout on changelevel lock** - Auto-resets if expired, with log warning
+- **Lock age shown in block log** - Blocked changelevel messages now include time since lock was set
+
 ## [2.7.3] - 2026-01-23
 
 ### Fixed

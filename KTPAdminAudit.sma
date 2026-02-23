@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.3
+/* KTP Admin Audit v2.7.4
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.3
- * DATE: 2026-01-23
+ * VERSION: 2.7.4
+ * DATE: 2026-02-19
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -50,6 +50,15 @@
  *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.7.4 (2026-02-19) - Fix Stuck Changelevel Lock
+ *   * FIXED: g_changeMapInProgress lock could get permanently stuck if countdown
+ *     task failed to fire (e.g., plugin reload mid-countdown), blocking ALL future
+ *     changelevel attempts including mapcycle and manual console commands
+ *   + ADDED: 15-second safety timeout on changelevel lock - auto-resets if expired
+ *   + ADDED: Log warning when lock timeout triggers
+ *   * NOTE: Caused 160ms phys spikes on NY 27015 for 3+ hours (2026-02-19) due to
+ *     engine repeatedly attempting blocked changelevel in physics loop
+ *
  * v2.7.2 (2026-01-20) - Fix Concurrent Changemap Crash
  *   * FIXED: Server crash when two players use .changemap simultaneously
  *   + ADDED: g_changeMapInProgress lock to prevent concurrent requests
@@ -142,7 +151,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "2.7.3"
+#define VERSION "2.7.4"
 #define AUTHOR "Nein_"
 
 // Menu action constants
@@ -174,7 +183,9 @@ new g_changeMapCountdown = 0;        // Countdown seconds remaining
 new g_changeMapTaskId = 54321;       // Task ID for countdown
 new bool:g_changeLevelPending = false;  // Flag to track pending changelevel (for hook)
 new bool:g_changeMapInProgress = false; // Lock to prevent concurrent .changemap requests
+new Float:g_changeMapLockTime = 0.0;   // Timestamp when lock was set (for safety timeout)
 const CHANGELEVEL_COUNTDOWN_SECS = 5;   // Seconds to wait before map change
+const Float:CHANGELEVEL_LOCK_TIMEOUT = 15.0; // Safety timeout to prevent permanent lock
 
 public plugin_init()
 {
@@ -1106,6 +1117,7 @@ execute_changemap(admin_id, const mapName[], const displayName[])
 
 	// Lock to prevent concurrent changemap requests (race condition fix)
 	g_changeMapInProgress = true;
+	g_changeMapLockTime = get_gametime();
 
 	// Store the pending map for the changelevel hook
 	copy(g_pendingChangeMap, charsmax(g_pendingChangeMap), mapName);
@@ -1137,7 +1149,18 @@ public hook_Host_Changelevel_f(const map[], const startspot[])
 	// If a changemap countdown is in progress, block any other changelevel attempts
 	// This prevents race conditions from concurrent .changemap or other sources
 	if (g_changeMapInProgress) {
-		log_amx("[KTP] Blocked changelevel to '%s' - changemap to '%s' already in progress", map, g_pendingChangeMap);
+		// Safety timeout: if the lock has been held too long, something went wrong
+		// (e.g., countdown task failed to fire after plugin reload). Reset and allow.
+		new Float:lockAge = get_gametime() - g_changeMapLockTime;
+		if (lockAge > CHANGELEVEL_LOCK_TIMEOUT) {
+			log_amx("[KTP] WARNING: Changelevel lock expired after %.1f seconds - resetting (was locked for '%s')", lockAge, g_pendingChangeMap);
+			g_changeMapInProgress = false;
+			g_changeLevelPending = false;
+			g_changeMapCountdown = 0;
+			remove_task(g_changeMapTaskId);
+			return HC_CONTINUE;
+		}
+		log_amx("[KTP] Blocked changelevel to '%s' - changemap to '%s' already in progress (%.1fs ago)", map, g_pendingChangeMap, lockAge);
 		return HC_SUPERCEDE;
 	}
 
