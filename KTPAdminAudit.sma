@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.4
+/* KTP Admin Audit v2.7.5
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.4
- * DATE: 2026-02-19
+ * VERSION: 2.7.5
+ * DATE: 2026-02-25
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -50,6 +50,15 @@
  *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.7.5 (2026-02-25) - Changemap Race Condition & Menu Buffer Fix
+ *   * FIXED: Two players could open .changemap menu simultaneously and both
+ *     complete a selection — second selection overwrote the first's countdown,
+ *     sending duplicate Discord audit messages
+ *   + ADDED: g_changeMapInProgress check in execute_changemap() (was only in cmd_changemap)
+ *   * FIXED: Map and player menu buffers (512 bytes) could truncate with long names,
+ *     cutting off navigation controls (Next/Prev/Cancel)
+ *   + CHANGED: Menu buffers increased from 512 to 1024 bytes
+ *
  * v2.7.4 (2026-02-19) - Fix Stuck Changelevel Lock
  *   * FIXED: g_changeMapInProgress lock could get permanently stuck if countdown
  *     task failed to fire (e.g., plugin reload mid-countdown), blocking ALL future
@@ -151,7 +160,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "2.7.4"
+#define VERSION "2.7.5"
 #define AUTHOR "Nein_"
 
 // Menu action constants
@@ -375,7 +384,7 @@ build_player_list(admin_id, bool:checkImmunity)
 
 show_player_menu(id)
 {
-	new menu[512], len = 0;
+	new menu[1024], len = 0;
 	new title[64];
 
 	if (g_menuAction[id] == ACTION_KICK)
@@ -992,7 +1001,7 @@ public cmd_changemap(id)
 
 show_map_menu(id)
 {
-	new menu[512], len = 0;
+	new menu[1024], len = 0;
 
 	len = formatex(menu, charsmax(menu), "\ySelect map to change to:^n^n");
 
@@ -1093,6 +1102,13 @@ public menu_map_handler(id, key)
 
 execute_changemap(admin_id, const mapName[], const displayName[])
 {
+	// Double-check lock — two players may have opened the menu before either selected
+	if (g_changeMapInProgress)
+	{
+		client_print(admin_id, print_chat, "[KTP] Map change already in progress. Please wait.");
+		return;
+	}
+
 	new adminName[32], adminAuth[35];
 	get_user_name(admin_id, adminName, charsmax(adminName));
 	get_user_authid(admin_id, adminAuth, charsmax(adminAuth));

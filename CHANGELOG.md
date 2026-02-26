@@ -2,6 +2,12 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.5] - 2026-02-25
+
+### Fixed
+- **Changemap race condition** - Two players could open `.changemap` menu simultaneously and both complete a selection. The second selection overwrote the first's pending map and restarted the countdown, sending duplicate Discord audit messages. Added `g_changeMapInProgress` check in `execute_changemap()` (was only checked in `cmd_changemap()` when opening the menu).
+- **Menu buffer truncation** - Player and map selection menus used 512-byte buffers that could overflow with long map/player names (up to ~675 bytes with max-length names), silently cutting off navigation controls (Next/Prev/Cancel). Increased to 1024 bytes.
+
 ## [2.7.4] - 2026-02-19
 
 ### Fixed
