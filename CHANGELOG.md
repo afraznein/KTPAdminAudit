@@ -2,6 +2,24 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.7] - 2026-03-08
+
+### Fixed
+- **Intermittent changemap countdown failure** (~10% failure rate) - `.changemap` countdown started but never completed. `execute_changemap()` used a roundabout path: `server_cmd("changelevel")` → hook intercepts → `HC_SUPERCEDE` → `start_changelevel_countdown()`. Calling `set_task()` from inside the hookchain handler intermittently failed to register the task. Now calls `start_changelevel_countdown()` directly — no hook interaction needed.
+  - Reported on Denver 1, March 8 2026 — analysis found 4 failures across ATL2, DEN1, NY1 in March
+
+### Removed
+- **`g_changeLevelPending` flag** - No longer needed without hook-based routing for `.changemap`
+
+## [2.7.6] - 2026-03-04
+
+### Fixed
+- **Changemap countdown never executed changelevel** - `task_changelevel_countdown()` called `server_cmd("changelevel")` without `server_exec()`, so the command sat in the buffer and was never processed. The initial call in `execute_changemap()` worked because it used both `server_cmd()` + `server_exec()`. Added `server_exec()` after the countdown's `server_cmd` call.
+  - Reported on Chicago 2 (27016), March 3 2026 — admin attempted `.changemap dod_anjou_a4` three consecutive times, each time the countdown started but the map never changed, requiring `.quit` to restart
+
+### Added
+- **Debug logging at countdown completion** - Logs confirmation when countdown reaches zero and changelevel is executed, for future troubleshooting
+
 ## [2.7.5] - 2026-02-25
 
 ### Fixed

@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.5
+/* KTP Admin Audit v2.7.7
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.5
- * DATE: 2026-02-25
+ * VERSION: 2.7.7
+ * DATE: 2026-03-08
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -50,6 +50,23 @@
  *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.7.7 (2026-03-08) - Fix Intermittent Changemap Countdown Failure
+ *   * FIXED: .changemap countdown started but never completed (~10% failure rate).
+ *     execute_changemap() used a roundabout path: server_cmd("changelevel") → hook
+ *     intercepts → HC_SUPERCEDE → start_changelevel_countdown(). set_task() called
+ *     from inside the hookchain handler intermittently failed to register the task.
+ *     Now calls start_changelevel_countdown() directly — no hook interaction needed.
+ *   * REMOVED: g_changeLevelPending flag (no longer needed without hook-based routing)
+ *   * NOTE: Reported on Denver 1, March 8 2026 — analysis found 4 failures across
+ *     ATL2, DEN1, NY1 in March alone, all post-v2.7.6
+ *
+ * v2.7.6 (2026-03-04) - Fix Changemap Countdown Not Executing
+ *   * FIXED: .changemap countdown completed but map never changed — server_cmd("changelevel")
+ *     in task_changelevel_countdown() was not followed by server_exec(), so the command
+ *     sat in the buffer and was never processed. Added server_exec() after server_cmd.
+ *   + ADDED: Debug log at countdown=0 to confirm task fires for future troubleshooting
+ *   * NOTE: Reported on Chicago 2 (27016), March 3 2026 — 3 consecutive failures
+ *
  * v2.7.5 (2026-02-25) - Changemap Race Condition & Menu Buffer Fix
  *   * FIXED: Two players could open .changemap menu simultaneously and both
  *     complete a selection — second selection overwrote the first's countdown,
@@ -160,7 +177,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "2.7.5"
+#define VERSION "2.7.7"
 #define AUTHOR "Nein_"
 
 // Menu action constants
@@ -190,7 +207,6 @@ new const g_banDurationNames[][] = { "1 Hour", "1 Day", "1 Week", "Permanent" };
 new g_pendingChangeMap[64];          // Map to change to after countdown
 new g_changeMapCountdown = 0;        // Countdown seconds remaining
 new g_changeMapTaskId = 54321;       // Task ID for countdown
-new bool:g_changeLevelPending = false;  // Flag to track pending changelevel (for hook)
 new bool:g_changeMapInProgress = false; // Lock to prevent concurrent .changemap requests
 new Float:g_changeMapLockTime = 0.0;   // Timestamp when lock was set (for safety timeout)
 const CHANGELEVEL_COUNTDOWN_SECS = 5;   // Seconds to wait before map change
@@ -246,6 +262,11 @@ public plugin_init()
 	// Register console changelevel hook (KTP-ReHLDS) - intercepts server_cmd("changelevel") for countdown
 	RegisterHookChain(RH_Host_Changelevel_f, "hook_Host_Changelevel_f", false);
 
+	set_task(0.1, "task_log_init");
+}
+
+public task_log_init()
+{
 	log_amx("[%s] v%s initialized (changelevel hook active)", PLUGIN, VERSION);
 }
 
@@ -1135,13 +1156,14 @@ execute_changemap(admin_id, const mapName[], const displayName[])
 	g_changeMapInProgress = true;
 	g_changeMapLockTime = get_gametime();
 
-	// Store the pending map for the changelevel hook
+	// Store the pending map and start countdown directly
+	// (Previously used a roundabout server_cmd → hook → supercede → start_countdown path,
+	// but set_task inside hookchain handlers intermittently failed to register)
 	copy(g_pendingChangeMap, charsmax(g_pendingChangeMap), mapName);
-	g_changeLevelPending = true;
 
-	// Execute changelevel - hook will intercept and show countdown
-	server_cmd("changelevel %s", mapName);
-	server_exec();  // Force immediate execution so hook can intercept
+	// Start countdown directly — after 5 seconds, task_changelevel_countdown will
+	// call server_cmd("changelevel") which goes through the hook normally
+	start_changelevel_countdown();
 }
 
 // ===========================================================================
@@ -1151,17 +1173,6 @@ execute_changemap(admin_id, const mapName[], const displayName[])
 
 public hook_Host_Changelevel_f(const map[], const startspot[])
 {
-	// If this is our pending .changemap request, supersede and show countdown
-	if (g_changeLevelPending) {
-		g_changeLevelPending = false;  // Reset flag
-
-		// Start countdown
-		start_changelevel_countdown();
-
-		// Supersede the engine changelevel - we'll do it manually after countdown
-		return HC_SUPERCEDE;
-	}
-
 	// If a changemap countdown is in progress, block any other changelevel attempts
 	// This prevents race conditions from concurrent .changemap or other sources
 	if (g_changeMapInProgress) {
@@ -1171,7 +1182,6 @@ public hook_Host_Changelevel_f(const map[], const startspot[])
 		if (lockAge > CHANGELEVEL_LOCK_TIMEOUT) {
 			log_amx("[KTP] WARNING: Changelevel lock expired after %.1f seconds - resetting (was locked for '%s')", lockAge, g_pendingChangeMap);
 			g_changeMapInProgress = false;
-			g_changeLevelPending = false;
 			g_changeMapCountdown = 0;
 			remove_task(g_changeMapTaskId);
 			return HC_CONTINUE;
@@ -1213,7 +1223,9 @@ public task_changelevel_countdown()
 		g_changeMapInProgress = false;
 
 		// Execute the changelevel
+		log_amx("[KTP] Changelevel countdown complete - executing changelevel to %s", g_pendingChangeMap);
 		server_cmd("changelevel %s", g_pendingChangeMap);
+		server_exec();  // Force immediate execution (without this, command may not be processed)
 		return;
 	}
 
