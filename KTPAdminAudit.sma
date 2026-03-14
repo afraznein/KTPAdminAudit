@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.7
+/* KTP Admin Audit v2.7.11
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.7
- * DATE: 2026-03-08
+ * VERSION: 2.7.11
+ * DATE: 2026-03-13
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -50,6 +50,32 @@
  *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.7.11 (2026-03-13) - Code Review Fixes
+ *   * FIXED: Slot recycling TOCTOU — store SteamID at menu selection, validate before kick/ban
+ *   * FIXED: banid not flushed before drop — added server_exec() before ktp_drop_client
+ *   * FIXED: STEAM_ID_PENDING/LAN/BOT bans silently fail — now warns admin, kick-only
+ *   * FIXED: Empty player list infinite menu redisplay — early-out guard
+ *   * FIXED: INI name key prefix match — split on '=' before comparing key
+ *   * FIXED: Dead case 1 in hook_ExecuteServerStringCmd switch — removed unreachable branch
+ *   * FIXED: Header version mismatch (was v2.7.9, define was 2.7.10)
+ *
+ * v2.7.9 (2026-03-13) - Task ID Safety + Ban Flush
+ *   * FIXED: fn_show_version task used raw player ID — could collide on reconnect
+ *   * FIXED: banid/writeid not flushed with server_exec() — ban could be lost on crash
+ *   + CHANGED: Changemap task IDs from mutable globals to #define constants
+ *   + CHANGED: containi → contain in INI parser for consistency
+ *   * FIXED: fn_execute_restart/fn_execute_quit used implicit task ID 0
+ *   + ADDED: server_exec() after _restart and quit commands for consistency
+ *   + ADDED: Source constant documentation on hook_ExecuteServerStringCmd
+ *
+ * v2.7.8 (2026-03-11) - Add Safety Fallback for Changemap Countdown
+ *   * FIXED: set_task(1.0, ..., .flags="b") intermittently fails to register,
+ *     causing the changelevel lock to get stuck for 8+ minutes until safety timeout.
+ *     Added a single-fire safety task that executes changelevel after countdown+5s
+ *     if the repeating countdown task never fired.
+ *   + ADDED: TASK_CHANGELEVEL_SAFETY for safety fallback task
+ *   * NOTE: Reported 3 failures on NY servers (Mar 1, 6, 8)
+ *
  * v2.7.7 (2026-03-08) - Fix Intermittent Changemap Countdown Failure
  *   * FIXED: .changemap countdown started but never completed (~10% failure rate).
  *     execute_changemap() used a roundabout path: server_cmd("changelevel") → hook
@@ -177,7 +203,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "2.7.7"
+#define VERSION "2.7.11"
 #define AUTHOR "Nein_"
 
 // Menu action constants
@@ -195,6 +221,7 @@ new g_mapCount = 0;
 // Menu state per player
 new g_menuAction[33];       // ACTION_NONE, ACTION_KICK, or ACTION_BAN
 new g_menuTarget[33];       // Selected target player id
+new g_menuTargetAuth[33][35]; // SteamID at selection time (TOCTOU guard)
 new g_menuPage[33];         // Current menu page for pagination
 new g_validPlayers[33][32]; // Valid player indices for each admin
 new g_validPlayerCount[33]; // Count of valid players
@@ -203,10 +230,16 @@ new g_validPlayerCount[33]; // Count of valid players
 new const g_banDurations[] = { 60, 1440, 10080, 0 };
 new const g_banDurationNames[][] = { "1 Hour", "1 Day", "1 Week", "Permanent" };
 
+// Task ID offsets (must not collide with player IDs 1-32 or each other)
+#define TASK_VERSION_BASE 5000       // Version message: id + TASK_VERSION_BASE
+#define TASK_CHANGELEVEL 54321       // Changelevel countdown
+#define TASK_CHANGELEVEL_SAFETY 54322 // Changelevel safety fallback
+#define TASK_RESTART 54323            // Delayed server restart
+#define TASK_QUIT 54324               // Delayed server quit
+
 // Changelevel hook variables
 new g_pendingChangeMap[64];          // Map to change to after countdown
 new g_changeMapCountdown = 0;        // Countdown seconds remaining
-new g_changeMapTaskId = 54321;       // Task ID for countdown
 new bool:g_changeMapInProgress = false; // Lock to prevent concurrent .changemap requests
 new Float:g_changeMapLockTime = 0.0;   // Timestamp when lock was set (for safety timeout)
 const CHANGELEVEL_COUNTDOWN_SECS = 5;   // Seconds to wait before map change
@@ -286,14 +319,15 @@ public client_putinserver(id)
 	{
 		if (get_user_flags(id) & (ADMIN_KICK | ADMIN_BAN))
 		{
-			set_task(5.0, "fn_show_version", id);
+			set_task(5.0, "fn_show_version", id + TASK_VERSION_BASE);
 		}
 	}
 }
 
-public fn_show_version(id)
+public fn_show_version(taskid)
 {
-	if (!is_user_connected(id))
+	new id = taskid - TASK_VERSION_BASE;
+	if (id < 1 || id > MAX_PLAYERS || !is_user_connected(id))
 		return;
 
 	client_print(id, print_chat, "%s version %s by %s", PLUGIN, VERSION, AUTHOR);
@@ -304,7 +338,9 @@ public client_disconnected(id)
 	// Clear menu state
 	g_menuAction[id] = ACTION_NONE;
 	g_menuTarget[id] = 0;
+	g_menuTargetAuth[id][0] = EOS;
 	g_menuPage[id] = 0;
+	remove_task(id + TASK_VERSION_BASE);
 }
 
 // ===========================================================================
@@ -392,6 +428,8 @@ build_player_list(admin_id, bool:checkImmunity)
 		if (checkImmunity && (get_user_flags(pid) & ADMIN_IMMUNITY))
 			continue;
 
+		if (g_validPlayerCount[admin_id] >= sizeof(g_validPlayers[]))
+			continue;
 		g_validPlayers[admin_id][g_validPlayerCount[admin_id]] = pid;
 		g_validPlayerCount[admin_id]++;
 	}
@@ -474,6 +512,14 @@ public menu_player_handler(id, key)
 		return PLUGIN_HANDLED;
 	}
 
+	// Guard: all players disconnected while menu was open
+	if (g_validPlayerCount[id] == 0)
+	{
+		client_print(id, print_chat, "[KTP] No players available.");
+		g_menuAction[id] = ACTION_NONE;
+		return PLUGIN_HANDLED;
+	}
+
 	// Next page
 	if (key == 7)
 	{
@@ -529,6 +575,7 @@ public menu_player_handler(id, key)
 	}
 
 	g_menuTarget[id] = target;
+	get_user_authid(target, g_menuTargetAuth[id], 34);
 
 	if (g_menuAction[id] == ACTION_KICK)
 	{
@@ -601,13 +648,23 @@ public menu_duration_handler(id, key)
 
 execute_kick(admin_id, target_id)
 {
+	// TOCTOU guard: verify slot still holds the same player selected in menu
+	new currentAuth[35];
+	get_user_authid(target_id, currentAuth, charsmax(currentAuth));
+	if (!equal(currentAuth, g_menuTargetAuth[admin_id]))
+	{
+		client_print(admin_id, print_chat, "[KTP] Target player changed - kick cancelled.");
+		g_menuAction[admin_id] = ACTION_NONE;
+		return;
+	}
+
 	new adminName[32], targetName[32], adminAuth[35], targetAuth[35];
 	new adminIP[22], targetIP[22];
 
 	get_user_name(admin_id, adminName, charsmax(adminName));
 	get_user_name(target_id, targetName, charsmax(targetName));
 	get_user_authid(admin_id, adminAuth, charsmax(adminAuth));
-	get_user_authid(target_id, targetAuth, charsmax(targetAuth));
+	copy(targetAuth, charsmax(targetAuth), currentAuth);
 	get_user_ip(admin_id, adminIP, charsmax(adminIP), 1);
 	get_user_ip(target_id, targetIP, charsmax(targetIP), 1);
 
@@ -638,13 +695,23 @@ execute_kick(admin_id, target_id)
 
 execute_ban(admin_id, target_id, duration)
 {
+	// TOCTOU guard: verify slot still holds the same player selected in menu
+	new currentAuth[35];
+	get_user_authid(target_id, currentAuth, charsmax(currentAuth));
+	if (!equal(currentAuth, g_menuTargetAuth[admin_id]))
+	{
+		client_print(admin_id, print_chat, "[KTP] Target player changed - ban cancelled.");
+		g_menuAction[admin_id] = ACTION_NONE;
+		return;
+	}
+
 	new adminName[32], targetName[32], adminAuth[35], targetAuth[35];
 	new adminIP[22], targetIP[22];
 
 	get_user_name(admin_id, adminName, charsmax(adminName));
 	get_user_name(target_id, targetName, charsmax(targetName));
 	get_user_authid(admin_id, adminAuth, charsmax(adminAuth));
-	get_user_authid(target_id, targetAuth, charsmax(targetAuth));
+	copy(targetAuth, charsmax(targetAuth), currentAuth);
 	get_user_ip(admin_id, adminIP, charsmax(adminIP), 1);
 	get_user_ip(target_id, targetIP, charsmax(targetIP), 1);
 
@@ -668,32 +735,62 @@ execute_ban(admin_id, target_id, duration)
 		formatex(durationStr, charsmax(durationStr), "%d day%s", days, days == 1 ? "" : "s");
 	}
 
-	// Log to server
-	log_amx("[KTP] BAN: Admin '%s' <%s> (%s) banned '%s' <%s> (%s) for %s",
-		adminName, adminAuth, adminIP,
-		targetName, targetAuth, targetIP,
-		durationStr);
+	// Check SteamID validity before logging/notifying — determines ban vs kick-only
+	new bool:invalidSteamId = (equal(targetAuth, "STEAM_ID_PENDING") || equal(targetAuth, "STEAM_ID_LAN") || equal(targetAuth, "BOT") || !targetAuth[0]);
 
-	// Send to Discord audit channels
-	new description[256];
-	formatex(description, charsmax(description),
-		"**Admin:** %s (`%s`)^n**Target:** %s (`%s`)^n**Duration:** %s",
-		adminName, adminAuth, targetName, targetAuth, durationStr);
-	ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Admin BAN", description, KTP_DISCORD_COLOR_RED);
+	if (invalidSteamId)
+	{
+		// Kick-only path — ban cannot be persisted with this SteamID
+		log_amx("[KTP] KICK (invalid SteamID): Admin '%s' <%s> (%s) kicked '%s' <%s> (%s) — ban not persistent",
+			adminName, adminAuth, adminIP,
+			targetName, targetAuth, targetIP);
 
-	// Notify players
-	client_print(0, print_chat, "[KTP] %s was banned by admin %s (%s).", targetName, adminName, durationStr);
+		new description[256];
+		formatex(description, charsmax(description),
+			"**Admin:** %s (`%s`)^n**Target:** %s (`%s`)^n**Note:** Invalid SteamID — kick only, ban not persistent",
+			adminName, adminAuth, targetName, targetAuth);
+		ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Admin KICK (invalid SteamID)", description, KTP_DISCORD_COLOR_ORANGE);
 
-	// Execute the ban using SteamID (without kick - kick command is blocked)
-	server_cmd("banid %d %s", duration, targetAuth);
-	server_cmd("writeid");
+		client_print(0, print_chat, "[KTP] %s was kicked by admin %s (ban failed: invalid SteamID).", targetName, adminName);
+		client_print(admin_id, print_chat, "[KTP] Warning: SteamID '%s' is not persistent. Player kicked but ban will not hold.", targetAuth);
+	}
+	else
+	{
+		// Normal ban path — SteamID is valid and persistent
+		log_amx("[KTP] BAN: Admin '%s' <%s> (%s) banned '%s' <%s> (%s) for %s",
+			adminName, adminAuth, adminIP,
+			targetName, targetAuth, targetIP,
+			durationStr);
+
+		new description[256];
+		formatex(description, charsmax(description),
+			"**Admin:** %s (`%s`)^n**Target:** %s (`%s`)^n**Duration:** %s",
+			adminName, adminAuth, targetName, targetAuth, durationStr);
+		ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Admin BAN", description, KTP_DISCORD_COLOR_RED);
+
+		client_print(0, print_chat, "[KTP] %s was banned by admin %s (%s).", targetName, adminName, durationStr);
+
+		// Execute the ban using SteamID (without kick - kick command is blocked)
+		// banid adds to in-memory ban list; server_exec flushes immediately so ban
+		// is active before the player is dropped. Deferred writeid saves to disk.
+		server_cmd("banid %d %s", duration, targetAuth);
+		server_exec();
+		set_task(0.1, "task_flush_banlist");
+	}
 
 	// Drop the client using ReHLDS DropClient API (bypasses blocked kick command)
 	new banReason[64];
-	formatex(banReason, charsmax(banReason), "Banned by admin (%s)", durationStr);
+	formatex(banReason, charsmax(banReason), "%s by admin (%s)", invalidSteamId ? "Kicked" : "Banned", durationStr);
 	ktp_drop_client(target_id, banReason);
 
 	g_menuAction[admin_id] = ACTION_NONE;
+}
+
+// Deferred ban file flush — avoids blocking menu handler with disk I/O
+public task_flush_banlist()
+{
+	server_cmd("writeid");
+	server_exec();
 }
 
 // ===========================================================================
@@ -768,6 +865,7 @@ public hook_SV_Rcon(const command[], const from_ip[], bool:is_valid)
 
 public hook_ExecuteServerStringCmd(const cmd[], source, id)
 {
+	// source values from KTP-ReHLDS: 0 = Console (stdin/tmux), 1 = RCON, 2 = Redirect
 	// Extract first word (the actual command)
 	new command[32];
 	copy(command, charsmax(command), cmd);
@@ -790,7 +888,7 @@ public hook_ExecuteServerStringCmd(const cmd[], source, id)
 		switch (source)
 		{
 			case 0: copy(sourceStr, charsmax(sourceStr), "Console");
-			case 1: copy(sourceStr, charsmax(sourceStr), "RCON");  // Should be caught by RH_SV_Rcon
+			// case 1 (RCON) is filtered at early return above — caught by RH_SV_Rcon hook
 			case 2: copy(sourceStr, charsmax(sourceStr), "Redirect");
 			default: formatex(sourceStr, charsmax(sourceStr), "Unknown (%d)", source);
 		}
@@ -841,14 +939,15 @@ public cmd_restart(id)
 	client_print(0, print_chat, "[KTP] Server restart initiated by admin %s.", adminName);
 
 	// Execute restart with a small delay for Discord message to send
-	set_task(1.0, "fn_execute_restart");
+	set_task(1.0, "fn_execute_restart", TASK_RESTART);
 
 	return PLUGIN_HANDLED;
 }
 
-public fn_execute_restart()
+public fn_execute_restart(taskid)
 {
 	server_cmd("_restart");
+	server_exec();
 }
 
 // ===========================================================================
@@ -883,14 +982,15 @@ public cmd_quit(id)
 	client_print(0, print_chat, "[KTP] Server shutdown initiated by admin %s.", adminName);
 
 	// Execute quit with a small delay for Discord message to send
-	set_task(1.0, "fn_execute_quit");
+	set_task(1.0, "fn_execute_quit", TASK_QUIT);
 
 	return PLUGIN_HANDLED;
 }
 
-public fn_execute_quit()
+public fn_execute_quit(taskid)
 {
 	server_cmd("quit");
+	server_exec();
 }
 
 // ===========================================================================
@@ -946,18 +1046,26 @@ load_map_list()
 			if (endBracket > 1)
 			{
 				// endBracket is position in original line, subtract 1 for the '[' offset
-				copy(currentMap, endBracket - 1, line[1]);
+				new copyLen = endBracket - 1;
+				if (copyLen > charsmax(currentMap)) copyLen = charsmax(currentMap);
+				copy(currentMap, copyLen, line[1]);
 				currentName[0] = EOS;  // Reset name for new section
 			}
 		}
-		// Check for name = value
-		else if (containi(line, "name") == 0)
+		// Check for name = value (split on '=' first, then match key)
+		else
 		{
 			new equals = contain(line, "=");
-			if (equals != -1)
+			if (equals > 0)
 			{
-				copy(currentName, charsmax(currentName), line[equals + 1]);
-				trim(currentName);
+				new key[32];
+				copy(key, min(equals, charsmax(key)), line);
+				trim(key);
+				if (equal(key, "name"))
+				{
+					copy(currentName, charsmax(currentName), line[equals + 1]);
+					trim(currentName);
+				}
 			}
 		}
 	}
@@ -1183,7 +1291,8 @@ public hook_Host_Changelevel_f(const map[], const startspot[])
 			log_amx("[KTP] WARNING: Changelevel lock expired after %.1f seconds - resetting (was locked for '%s')", lockAge, g_pendingChangeMap);
 			g_changeMapInProgress = false;
 			g_changeMapCountdown = 0;
-			remove_task(g_changeMapTaskId);
+			remove_task(TASK_CHANGELEVEL);
+			remove_task(TASK_CHANGELEVEL_SAFETY);
 			return HC_CONTINUE;
 		}
 		log_amx("[KTP] Blocked changelevel to '%s' - changemap to '%s' already in progress (%.1fs ago)", map, g_pendingChangeMap, lockAge);
@@ -1198,8 +1307,13 @@ public hook_Host_Changelevel_f(const map[], const startspot[])
 stock start_changelevel_countdown()
 {
 	g_changeMapCountdown = CHANGELEVEL_COUNTDOWN_SECS;
-	remove_task(g_changeMapTaskId);
-	set_task(1.0, "task_changelevel_countdown", g_changeMapTaskId, .flags = "b");
+	remove_task(TASK_CHANGELEVEL);
+	remove_task(TASK_CHANGELEVEL_SAFETY);
+	set_task(1.0, "task_changelevel_countdown", TASK_CHANGELEVEL, .flags = "b");
+
+	// Safety fallback: if the repeating task fails to register (intermittent AMX bug),
+	// this single-fire task executes the changelevel after countdown + 5s buffer
+	set_task(float(CHANGELEVEL_COUNTDOWN_SECS) + 5.0, "task_changelevel_safety", TASK_CHANGELEVEL_SAFETY);
 
 	log_amx("[KTP] Changelevel countdown started: %d seconds to %s",
 		CHANGELEVEL_COUNTDOWN_SECS, g_pendingChangeMap);
@@ -1216,16 +1330,16 @@ public task_changelevel_countdown()
 
 	if (g_changeMapCountdown <= 0) {
 		// Time's up - execute changelevel
-		remove_task(g_changeMapTaskId);
+		remove_task(TASK_CHANGELEVEL);
+		remove_task(TASK_CHANGELEVEL_SAFETY);
 
 		// Reset the in-progress flag BEFORE executing changelevel
-		// The hook will still run but will see g_changeMapInProgress = false and allow it
 		g_changeMapInProgress = false;
 
 		// Execute the changelevel
 		log_amx("[KTP] Changelevel countdown complete - executing changelevel to %s", g_pendingChangeMap);
 		server_cmd("changelevel %s", g_pendingChangeMap);
-		server_exec();  // Force immediate execution (without this, command may not be processed)
+		server_exec();
 		return;
 	}
 
@@ -1237,4 +1351,20 @@ public task_changelevel_countdown()
 	// HUD countdown
 	set_hudmessage(255, 255, 0, -1.0, 0.35, 0, 0.0, 0.9, 0.0, 0.0, -1);
 	show_hudmessage(0, "Map changing to %s in %d...", g_pendingChangeMap, g_changeMapCountdown);
+}
+
+// Safety fallback: fires if the repeating countdown task failed to register
+public task_changelevel_safety()
+{
+	if (!g_changeMapInProgress)
+		return;  // Countdown already completed normally
+
+	// The repeating task never fired - execute changelevel directly
+	log_amx("[KTP] WARNING: Changelevel countdown task failed - safety fallback executing changelevel to %s", g_pendingChangeMap);
+	remove_task(TASK_CHANGELEVEL);
+
+	g_changeMapInProgress = false;
+	g_changeMapCountdown = 0;
+	server_cmd("changelevel %s", g_pendingChangeMap);
+	server_exec();
 }

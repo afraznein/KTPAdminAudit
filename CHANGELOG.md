@@ -2,6 +2,49 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.11] - 2026-03-13
+
+### Fixed
+- **Slot recycling TOCTOU on kick/ban** — Between menu selection and action execution, a player slot could be recycled to a different player. Now stores target's SteamID at selection time (`g_menuTargetAuth`) and validates it matches before executing kick or ban. Prevents wrong-player actions.
+- **`banid` not flushed before player drop** — `server_cmd("banid ...")` queued the command but `ktp_drop_client` fired before the buffer was flushed. Added `server_exec()` immediately after `banid` so the ban is in memory before the player is dropped. Deferred `writeid` still handles disk flush.
+- **`STEAM_ID_PENDING`/LAN/BOT bans silently fail** — Pre-auth or LAN players have non-persistent SteamIDs that `banid` can't use. Now warns the admin and falls back to kick-only with a log entry.
+- **Empty player list infinite menu redisplay** — If all players disconnect while admin has the menu open, navigation keys caused an infinite redisplay loop. Added early-out guard when `g_validPlayerCount` is zero.
+- **INI `name` key prefix match** — `contain(line, "name") == 0` matched any key starting with "name" (e.g., `nameserver=...`). Now splits on `=` first and compares the extracted key, consistent with `ktp_discord.inc`.
+- **Dead `case 1` in `hook_ExecuteServerStringCmd`** — Unreachable branch (RCON source filtered by early return). Removed and added comment explaining why.
+- **Header version mismatch** — Comment block said v2.7.9, `#define VERSION` was 2.7.10. Synchronized to 2.7.11.
+
+---
+
+## [2.7.10] - 2026-03-13
+
+### Changed
+- **Deferred ban file flush** — `writeid` + `server_exec()` moved from `execute_ban()` to a 0.1s deferred task (`task_flush_banlist`). The `banid` command adds the SteamID to the in-memory ban list immediately; the disk flush can happen asynchronously. Removes 5-10ms of synchronous disk I/O from the menu handler frame.
+
+---
+
+## [2.7.9] - 2026-03-13
+
+### Fixed
+- **Version message task used raw player ID as task ID** — Could collide if an admin reconnects within 5 seconds. Now uses `id + TASK_VERSION_BASE` offset and extracts player ID from task ID in the callback. Task is also removed on `client_disconnected`.
+- **`banid`/`writeid` not flushed with `server_exec()`** — Ban commands were queued but not guaranteed to flush before `ktp_drop_client` fired. If the server crashed in the same frame, the ban record could be lost. Added `server_exec()` after `writeid`.
+- **`fn_execute_restart`/`fn_execute_quit` used implicit task ID 0** — Could silently collide with other default-ID tasks. Now use dedicated `TASK_RESTART` (54323) and `TASK_QUIT` (54324) constants. Also added `server_exec()` after both commands for consistency.
+
+### Changed
+- Changemap task IDs from mutable globals (`g_changeMapTaskId`/`g_changeMapSafetyTaskId`) to `#define` constants (`TASK_CHANGELEVEL`/`TASK_CHANGELEVEL_SAFETY`).
+- `containi` → `contain` in INI map parser for consistency with rest of codebase.
+- Added source constant documentation comment on `hook_ExecuteServerStringCmd` (0=Console, 1=RCON, 2=Redirect).
+
+---
+
+## [2.7.8] - 2026-03-11
+
+### Fixed
+- **Changelevel countdown safety fallback** — Added single-fire `task_changelevel_safety()` at countdown+5s as fallback for when the repeating countdown task fails to register (~10% failure rate from hookchain context). If the normal countdown completes, the safety task is a no-op.
+- **`copy()` buffer overflow in INI map parser** — `load_map_list()` did not clamp the copy length to `charsmax(currentMap)`. A map name longer than 31 chars in `ktp_maps.ini` could overflow the `currentMap[32]` buffer.
+- **`build_player_list` missing bounds check** — No guard against writing past `g_validPlayers[admin_id][32]` inner dimension. Added `sizeof` bounds check before insertion.
+- **Safety fallback did not clear `g_changeMapCountdown`** — `task_changelevel_safety()` reset `g_changeMapInProgress` but left the countdown variable at a stale value.
+- **`compile.sh` dead error block** — `set -e` caused the script to exit before the manual `$? -ne 0` check could run. Removed `set -e` so the error message is actually reachable.
+
 ## [2.7.7] - 2026-03-08
 
 ### Fixed
