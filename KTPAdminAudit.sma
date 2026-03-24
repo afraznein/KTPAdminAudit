@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.11
+/* KTP Admin Audit v2.7.12
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.11
- * DATE: 2026-03-13
+ * VERSION: 2.7.12
+ * DATE: 2026-03-24
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -203,7 +203,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN "KTP Admin Audit"
-#define VERSION "2.7.11"
+#define VERSION "2.7.12"
 #define AUTHOR "Nein_"
 
 // Menu action constants
@@ -236,6 +236,7 @@ new const g_banDurationNames[][] = { "1 Hour", "1 Day", "1 Week", "Permanent" };
 #define TASK_CHANGELEVEL_SAFETY 54322 // Changelevel safety fallback
 #define TASK_RESTART 54323            // Delayed server restart
 #define TASK_QUIT 54324               // Delayed server quit
+#define TASK_FLUSH_BANLIST 54325      // Deferred writeid after ban
 
 // Changelevel hook variables
 new g_pendingChangeMap[64];          // Map to change to after countdown
@@ -575,7 +576,7 @@ public menu_player_handler(id, key)
 	}
 
 	g_menuTarget[id] = target;
-	get_user_authid(target, g_menuTargetAuth[id], 34);
+	get_user_authid(target, g_menuTargetAuth[id], charsmax(g_menuTargetAuth[]));
 
 	if (g_menuAction[id] == ACTION_KICK)
 	{
@@ -597,6 +598,12 @@ public menu_player_handler(id, key)
 
 show_duration_menu(id)
 {
+	// Verify target is still connected (could have disconnected between menu selections)
+	if (!is_user_connected(g_menuTarget[id])) {
+		client_print(id, print_chat, "[KTP] Target player disconnected.");
+		return;
+	}
+
 	new menu[256], len = 0;
 	new targetName[32];
 	get_user_name(g_menuTarget[id], targetName, charsmax(targetName));
@@ -775,7 +782,8 @@ execute_ban(admin_id, target_id, duration)
 		// is active before the player is dropped. Deferred writeid saves to disk.
 		server_cmd("banid %d %s", duration, targetAuth);
 		server_exec();
-		set_task(0.1, "task_flush_banlist");
+		remove_task(TASK_FLUSH_BANLIST);
+		set_task(0.1, "task_flush_banlist", TASK_FLUSH_BANLIST);
 	}
 
 	// Drop the client using ReHLDS DropClient API (bypasses blocked kick command)
@@ -1284,6 +1292,12 @@ public hook_Host_Changelevel_f(const map[], const startspot[])
 	// If a changemap countdown is in progress, block any other changelevel attempts
 	// This prevents race conditions from concurrent .changemap or other sources
 	if (g_changeMapInProgress) {
+		// Allow changelevel if it's for the same map we're counting down to
+		// (e.g., match-end changelevel to the same map during our countdown)
+		if (equali(map, g_pendingChangeMap)) {
+			return HC_CONTINUE;
+		}
+
 		// Safety timeout: if the lock has been held too long, something went wrong
 		// (e.g., countdown task failed to fire after plugin reload). Reset and allow.
 		new Float:lockAge = get_gametime() - g_changeMapLockTime;

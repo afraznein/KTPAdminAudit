@@ -2,6 +2,16 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.12] - 2026-03-24
+
+### Fixed
+- **Ban duration menu shows wrong name if target disconnected** — `show_duration_menu` read the target player's name without checking if they were still connected. If the target disconnected between player selection and duration menu display, the name shown was from whoever now occupied that slot. Added `is_user_connected` guard.
+- **`task_flush_banlist` could accumulate on rapid sequential bans** — Used no task ID, so two rapid bans queued two separate `writeid` tasks. Added `TASK_FLUSH_BANLIST` constant with `remove_task` before `set_task` to collapse into a single deferred write.
+- **Changelevel hook blocked match-end changelevel during countdown** — `hook_Host_Changelevel_f` returned `HC_SUPERCEDE` for ANY changelevel while the countdown lock was held, including match-end changelevel from KTPMatchHandler. Now allows changelevel if the requested map matches `g_pendingChangeMap`.
+- **`get_user_authid` hardcoded buffer length** — Passed `34` instead of `charsmax(g_menuTargetAuth[])`. Numerically identical but inconsistent with the rest of the file. Normalized.
+
+---
+
 ## [2.7.11] - 2026-03-13
 
 ### Fixed
