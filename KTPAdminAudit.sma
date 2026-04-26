@@ -192,6 +192,7 @@
 #include <amxmodx>
 #include <amxmisc>
 #include <ktp_discord>
+#include <ktp_version_reporter>
 #include <reapi>
 
 #pragma semicolon 1
@@ -202,9 +203,9 @@ native ktp_drop_client(id, const reason[] = "");
 // KTP native to check if match is in progress (from KTPMatchHandler)
 native ktp_is_match_active();
 
-#define PLUGIN "KTP Admin Audit"
-#define VERSION "2.7.12"
-#define AUTHOR "Nein_"
+#define PLUGIN_NAME    "KTP Admin Audit"
+#define PLUGIN_VERSION "2.7.13"
+#define PLUGIN_AUTHOR  "Nein_"
 
 // Menu action constants
 #define ACTION_NONE      0
@@ -248,7 +249,8 @@ const Float:CHANGELEVEL_LOCK_TIMEOUT = 15.0; // Safety timeout to prevent perman
 
 public plugin_init()
 {
-	register_plugin(PLUGIN, VERSION, AUTHOR);
+	register_plugin(PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
+	KTP_RegisterVersion(PLUGIN_NAME, PLUGIN_VERSION);
 
 	// Register kick commands
 	register_clcmd("say .kick", "cmd_kick");
@@ -301,7 +303,7 @@ public plugin_init()
 
 public task_log_init()
 {
-	log_amx("[%s] v%s initialized (changelevel hook active)", PLUGIN, VERSION);
+	log_amx("[%s] v%s initialized (changelevel hook active)", PLUGIN_NAME, PLUGIN_VERSION);
 }
 
 public plugin_cfg()
@@ -331,7 +333,7 @@ public fn_show_version(taskid)
 	if (id < 1 || id > MAX_PLAYERS || !is_user_connected(id))
 		return;
 
-	client_print(id, print_chat, "%s version %s by %s", PLUGIN, VERSION, AUTHOR);
+	client_print(id, print_chat, "%s version %s by %s", PLUGIN_NAME, PLUGIN_VERSION, PLUGIN_AUTHOR);
 }
 
 public client_disconnected(id)
