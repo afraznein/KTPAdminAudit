@@ -1355,7 +1355,15 @@ public task_changelevel_countdown()
 		// Execute the changelevel
 		log_amx("[KTP] Changelevel countdown complete - executing changelevel to %s", g_pendingChangeMap);
 		server_cmd("changelevel %s", g_pendingChangeMap);
-		server_exec();
+		// Do NOT server_exec() here. Forcing the changelevel to run synchronously
+		// inside this task callback corrupts the AMXX task scheduler on the
+		// DESTINATION map: every set_task() in the new map's plugin_cfg registers
+		// (task_exists() == 1) but never dispatches — silently killing repeating
+		// tasks in other plugins (e.g. KTPHudObserver's HUD timer / cap polling go
+		// dead for that whole map). Let the queued command flush on the next engine
+		// frame instead (same pattern KTPMatchHandler uses for its changelevels).
+		// The v2.7.6 server_exec() was only needed for the old hook-supercede path
+		// that v2.7.7 removed; reproduced + verified on the local stack 2026-06.
 		return;
 	}
 
@@ -1382,5 +1390,7 @@ public task_changelevel_safety()
 	g_changeMapInProgress = false;
 	g_changeMapCountdown = 0;
 	server_cmd("changelevel %s", g_pendingChangeMap);
-	server_exec();
+	// No server_exec() — see task_changelevel_countdown(): a synchronous exec from
+	// inside a task callback wedges the destination map's AMXX task scheduler. The
+	// queued command flushes on the next engine frame.
 }
