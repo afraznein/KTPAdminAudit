@@ -2,6 +2,12 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.14] - 2026-06-12
+
+### Fixed
+- **`.changemap` countdown wedged the next map's AMXX task scheduler** (PR #1, contributed by Cadaver / JimmyLockhart65616). `server_exec()` in `task_changelevel_countdown()` and `task_changelevel_safety()` ran the changelevel synchronously inside the AMXX task callback, which left every `set_task()` in the destination map's `plugin_cfg` registered (`task_exists() == 1`) but never dispatched — silently killing repeating tasks in other plugins. The visible casualty was **KTPHudObserver** (HUD timer + capture-zone polling dead for the whole map, only after an admin `.changemap`). Removed both `server_exec()` calls; the queued `changelevel` flushes on the next engine frame (same pattern KTPMatchHandler uses). The v2.7.6 `server_exec()` was only needed for the old hook-supercede routing that v2.7.7 removed, so its rationale no longer applies. Reproduced + A/B-verified on the local KTP stack (`dod_anzio → dod_flash`): with `server_exec()` the new map's HudObserver tasks got 0 dispatches; without it, ~300.
+- **Header/define version mismatch** — the file header and `VERSION:` comment said `2.7.12` while `PLUGIN_VERSION` was `2.7.13`. Reconciled all three to `2.7.14`.
+
 ## [2.7.13] - 2026-04-25
 
 ### Added

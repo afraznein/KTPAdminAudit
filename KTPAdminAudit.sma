@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.12
+/* KTP Admin Audit v2.7.14
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.12
- * DATE: 2026-03-24
+ * VERSION: 2.7.14
+ * DATE: 2026-06-12
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -50,6 +50,18 @@
  *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.7.14 (2026-06-12) - Fix Changemap Wedging Destination Map's Task Scheduler (PR #1)
+ *   * FIXED: .changemap countdown wedged the next map's AMXX task scheduler.
+ *     server_exec() in task_changelevel_countdown() (and the safety fallback) ran the
+ *     changelevel synchronously inside the task callback, leaving every set_task() on
+ *     the new map registered (task_exists==1) but never dispatched — silently killing
+ *     repeating tasks in other plugins (notably KTPHudObserver's HUD/cap polling went
+ *     dead for the whole map). Removed server_exec(); the queued changelevel flushes on
+ *     the next engine frame. The v2.7.6 server_exec() was only needed for the old
+ *     hook-supercede path that v2.7.7 removed.
+ *   * FIXED: header/VERSION said 2.7.12 while PLUGIN_VERSION define was 2.7.13 — reconciled.
+ *   * Contributed by Cadaver (JimmyLockhart65616), repro'd + verified on the local stack.
+ *
  * v2.7.11 (2026-03-13) - Code Review Fixes
  *   * FIXED: Slot recycling TOCTOU — store SteamID at menu selection, validate before kick/ban
  *   * FIXED: banid not flushed before drop — added server_exec() before ktp_drop_client
@@ -204,7 +216,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN_NAME    "KTP Admin Audit"
-#define PLUGIN_VERSION "2.7.13"
+#define PLUGIN_VERSION "2.7.14"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Menu action constants
