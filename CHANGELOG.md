@@ -2,6 +2,15 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.15] - 2026-07-06
+
+Fix wave from the 2026-07-05 full-stack review (Part 2 P2 items).
+
+### Fixed
+- **Ban-flow immunity TOCTOU** — immunity was checked when the admin selected the player (menu filter + double-check), but never re-checked after the duration menu. Flags granted in that window (target re-auths as admin, live flag grant) could still get an immune player banned. `execute_ban` now re-checks `ADMIN_IMMUNITY` right next to the existing SteamID TOCTOU guard, covering the whole select→duration→execute chain.
+- **"1 Week" ban logged and announced as "7 days"** — the duration string builder had no weeks tier, so the 10080-minute option's log line, Discord embed, chat announcement, and drop reason all disagreed with the menu label. Added a weeks tier (`1 week`).
+- **`get_players "c"` comment** claimed the flag means "connected" — it means *skip bots*. HLTV proxies still pass and are intentionally NOT filtered: they've been kickable from the menu by design since v2.3.0 (stuck-proxy recovery).
+
 ## [2.7.14] - 2026-06-12
 
 ### Fixed

@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.14
+/* KTP Admin Audit v2.7.15
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.14
- * DATE: 2026-06-12
+ * VERSION: 2.7.15
+ * DATE: 2026-07-06
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -50,6 +50,14 @@
  *   discord_channel_id_admin
  *
  * ========== CHANGELOG ==========
+ * v2.7.15 (2026-07-06) - Ban-flow immunity re-check + label/comment fixes
+ *   * FIXED: immunity checked only at player-select — flags granted between
+ *     the select and duration menus (re-auth, live grant) could still ban an
+ *     immune player. execute_ban now re-checks next to the auth TOCTOU guard.
+ *   * FIXED: "1 Week" menu label logged/announced as "7 days" — duration
+ *     string builder gained a weeks tier.
+ *   * FIXED: get_players "c" comment claimed "connected" (flag = skip bots).
+ *
  * v2.7.14 (2026-06-12) - Fix Changemap Wedging Destination Map's Task Scheduler (PR #1)
  *   * FIXED: .changemap countdown wedged the next map's AMXX task scheduler.
  *     server_exec() in task_changelevel_countdown() (and the safety fallback) ran the
@@ -216,7 +224,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN_NAME    "KTP Admin Audit"
-#define PLUGIN_VERSION "2.7.14"
+#define PLUGIN_VERSION "2.7.15"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Menu action constants
@@ -423,7 +431,7 @@ public cmd_ban(id)
 build_player_list(admin_id, bool:checkImmunity)
 {
 	new players[32], num;
-	get_players(players, num, "c");  // connected (includes HLTV proxies)
+	get_players(players, num, "c");  // "c" = skip bots; HLTV proxies intentionally NOT filtered — kickable by design (v2.3.0)
 
 	g_validPlayerCount[admin_id] = 0;
 
@@ -675,6 +683,7 @@ execute_kick(admin_id, target_id)
 	if (!equal(currentAuth, g_menuTargetAuth[admin_id]))
 	{
 		client_print(admin_id, print_chat, "[KTP] Target player changed - kick cancelled.");
+		log_amx("[KTP] KICK CANCELLED (slot changed occupant): expected <%s> found <%s>", g_menuTargetAuth[admin_id], currentAuth);
 		g_menuAction[admin_id] = ACTION_NONE;
 		return;
 	}
@@ -722,6 +731,21 @@ execute_ban(admin_id, target_id, duration)
 	if (!equal(currentAuth, g_menuTargetAuth[admin_id]))
 	{
 		client_print(admin_id, print_chat, "[KTP] Target player changed - ban cancelled.");
+		log_amx("[KTP] BAN CANCELLED (slot changed occupant): expected <%s> found <%s>", g_menuTargetAuth[admin_id], currentAuth);
+		g_menuAction[admin_id] = ACTION_NONE;
+		return;
+	}
+
+	// Immunity re-check: the select menu filtered immune players, but flags
+	// can be granted between the select and duration menus (re-auth, live
+	// admin grant) — without this, that window bans an immune player.
+	if (get_user_flags(target_id) & ADMIN_IMMUNITY)
+	{
+		new aName[32], tName[32];
+		get_user_name(admin_id, aName, charsmax(aName));
+		get_user_name(target_id, tName, charsmax(tName));
+		client_print(admin_id, print_chat, "[KTP] That player has admin immunity - ban cancelled.");
+		log_amx("[KTP] BAN CANCELLED (immunity gained mid-flow): admin '%s' target '%s'", aName, tName);
 		g_menuAction[admin_id] = ACTION_NONE;
 		return;
 	}
@@ -750,10 +774,17 @@ execute_ban(admin_id, target_id, duration)
 		new hours = duration / 60;
 		formatex(durationStr, charsmax(durationStr), "%d hour%s", hours, hours == 1 ? "" : "s");
 	}
-	else
+	else if (duration < 10080)
 	{
 		new days = duration / 1440;
 		formatex(durationStr, charsmax(durationStr), "%d day%s", days, days == 1 ? "" : "s");
+	}
+	else
+	{
+		// Weeks tier so the log/embed/chat wording matches the menu label
+		// ("1 Week" used to log as "7 days")
+		new weeks = duration / 10080;
+		formatex(durationStr, charsmax(durationStr), "%d week%s", weeks, weeks == 1 ? "" : "s");
 	}
 
 	// Check SteamID validity before logging/notifying — determines ban vs kick-only
