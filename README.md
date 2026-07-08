@@ -1,6 +1,6 @@
 # KTP Admin Audit Plugin
 
-**Version:** 2.7.16
+**Version:** 2.7.17
 **Author:** Nein_
 **Date:** July 2026
 
@@ -18,7 +18,7 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 - **Admin Flag Permissions** - Requires ADMIN_KICK (c) or ADMIN_BAN (d) flags
 - **Immunity Protection** - Players with ADMIN_IMMUNITY (a) cannot be kicked/banned
 - **Ban Duration Selection** - 1 hour, 1 day, 1 week, or permanent
-- **Timed-Ban Persistence** - Timed bans survive server restarts via `ktp_timed_bans.ini` (v2.7.16+)
+- **Timed-Ban Persistence** - Timed bans survive server restarts via `ktp_timed_bans.ini` (v2.7.16+); `.unban <steamid>` lifts one cleanly (v2.7.17+)
 - **Discord Audit Logging** - Real-time notifications to all configured audit channels
 - **RCON Audit Logging** - Logs restart commands with source IP (v2.2.0+); failed RCON auth attempts batched into per-minute Discord summaries (v2.7.16+, ReHLDS .928+)
 - **Console Command Audit** - Catches all console commands including LinuxGSM (v2.3.0+)
@@ -122,7 +122,7 @@ The engine's `writeid` only saves **permanent** ban filters — a timed `banid` 
   `unban_epoch` is a Unix timestamp (`get_systime()` + duration). The names are informational only.
 - At boot the plugin reads the file, **drops expired entries** (rewriting the file without them, logged as `TIMED_BAN_EXPIRED`), dedups duplicate SteamIDs (latest line wins), skips malformed lines (content logged), and re-applies each remaining entry with `banid <remaining_minutes> <steamid>` — logged as `TIMED_BAN_REAPPLY sid=... remaining_min=...`.
 - No `writeid` is issued for these — re-application at every boot carries the persistence. Re-apply runs once per process (not on every map change).
-- **To lift a timed ban early:** `removeid` removes it from the live server, but you must also delete its line from `ktp_timed_bans.ini` or it will be re-applied at the next restart.
+- **To lift a timed ban early: use `.unban <steamid>`** (v2.7.17+) — it runs `removeid` + `writeid` AND removes the SteamID's lines from `ktp_timed_bans.ini` in one step. A bare `removeid` alone is NOT enough: the persisted record re-applies the ban at the next restart.
 - The file is created on the first timed ban; a missing file is normal.
 
 ### Failed-RCON Audit Batching (ReHLDS .928+)

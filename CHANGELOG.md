@@ -2,6 +2,11 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.17] - 2026-07-08
+
+### Added
+- **`.unban <steamid>` command** (`/unban`, `ktp_unban`; ADMIN_BAN) — closes the manual-removeid trap 2.7.16's persistence introduced: a bare `removeid` cleared the in-memory filter but left the timed-ban record on disk, so the next boot's re-apply silently re-banned the player. The command does all three halves atomically from the operator's view: `removeid` (in-memory, immediate), `writeid` (persists removal of permanent filters — deferred 0.1s via the same task the ban path uses), and removal of the SteamID's lines from `ktp_timed_bans.ini` (deferred 0.1s, same game-thread-I/O discipline as ban-record appends; pending removals survive a changelevel via the `plugin_cfg` flush; no-op unbans leave the file untouched). The SteamID is strictly shape-validated (`STEAM_X:Y:Z`) before it reaches `server_cmd` — the command buffer splits on `;`, so a loose check would let an ADMIN_BAN admin smuggle ADMIN_RCON-tier commands past the privilege gate and the audit trail. Chronology is order-independent: an unban drops same-SID pending ban appends, and a re-ban cancels a same-SID pending removal (the stale file line is then superseded by latest-wins dedup at boot). Audited (`UNBAN` log line + Discord embed).
+
 ## [2.7.16] - 2026-07-08
 
 Fix wave from the 2026-07-06 Wave-2 full-surface assessment (AA-1/AA-2/AA-3/AA-4/AA-5 + the .928 RCON-audit consumer).

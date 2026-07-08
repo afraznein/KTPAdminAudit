@@ -1,8 +1,8 @@
-/* KTP Admin Audit v2.7.16
+/* KTP Admin Audit v2.7.17
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.16
+ * VERSION: 2.7.17
  * DATE: 2026-07-08
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
@@ -31,6 +31,8 @@
  * ========== COMMANDS ==========
  *   .kick / /kick          - Open kick menu (requires ADMIN_KICK flag "c")
  *   .ban  / /ban           - Open ban menu (requires ADMIN_BAN flag "d")
+ *   .unban <steamid>       - Lift a ban: removeid + writeid + timed-ban
+ *                            record removal (requires ADMIN_BAN flag "d")
  *   .changemap / /changemap - Open map change menu (available to ALL players)
  *   .restart / /restart    - Restart server (requires ADMIN_RCON flag "l")
  *   .quit / /quit          - Shutdown server (requires ADMIN_RCON flag "l")
@@ -54,6 +56,10 @@
  * their unban epoch and re-applied at boot for the remaining time)
  *
  * ========== CHANGELOG ==========
+ * v2.7.17 (2026-07-08) - .unban <steamid>: removeid + deferred writeid +
+ *                        timed-ban record removal in one audited command
+ *                        (closes the manual-removeid re-ban trap); strict
+ *                        SteamID shape validation before server_cmd
  * v2.7.16 (2026-07-08) - Wave-2 fixes: stale changemap lock, actor re-check,
  *                        timed-ban persistence, RCON failure batching
  *   * FIXED: .changemap lock survived map changes (globals persist in extension
@@ -255,7 +261,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN_NAME    "KTP Admin Audit"
-#define PLUGIN_VERSION "2.7.16"
+#define PLUGIN_VERSION "2.7.17"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Menu action constants
@@ -299,6 +305,14 @@ new const g_banDurationNames[][] = { "1 Hour", "1 Day", "1 Week", "Permanent" };
 #define MAX_PENDING_BAN_RECORDS 4
 new g_pendingBanLines[MAX_PENDING_BAN_RECORDS][192];
 new g_pendingBanLineCount = 0;
+
+// Pending .unban file removals — same deferred-I/O discipline. Chronology is
+// kept order-independent: a new ban cancels a same-sid pending unban, and a
+// new unban drops same-sid pending ban lines, so flush order can't resurrect
+// either side.
+#define TASK_FLUSH_UNBANS 54328
+new g_pendingUnbanSids[MAX_PENDING_BAN_RECORDS][44];
+new g_pendingUnbanCount = 0;
 
 // Changelevel hook variables
 new g_pendingChangeMap[64];          // Map to change to after countdown
@@ -350,6 +364,12 @@ public plugin_init()
 	register_clcmd("say /ban", "cmd_ban");
 	register_clcmd("say_team /ban", "cmd_ban");
 	register_clcmd("ktp_ban", "cmd_ban");  // Console command
+
+	register_clcmd("say .unban", "cmd_unban");
+	register_clcmd("say_team .unban", "cmd_unban");
+	register_clcmd("say /unban", "cmd_unban");
+	register_clcmd("say_team /unban", "cmd_unban");
+	register_clcmd("ktp_unban", "cmd_unban");  // Console command
 
 	// Menu handlers
 	register_menucmd(register_menuid("KTP Kick Menu"), 1023, "menu_player_handler");
@@ -410,11 +430,15 @@ public plugin_cfg()
 	// Always start a map with the lock clear.
 	reset_changemap_lock();
 
-	// A ban recorded <0.1s before a changelevel loses its flush task to the
-	// per-map task clear; the buffered lines survive in globals, so flush
-	// them on the new map before anything else touches the file.
+	// A ban/unban issued <0.1s before a changelevel loses its flush task to
+	// the per-map task clear; the buffered entries survive in globals, so
+	// flush them on the new map before anything else touches the file.
+	// Ban appends before unban removals — the pending sets are already
+	// chronology-reconciled, so this order is just append-then-filter.
 	if (g_pendingBanLineCount > 0)
 		task_flush_ban_records();
+	if (g_pendingUnbanCount > 0)
+		task_flush_unbans();
 
 	// Re-apply persisted timed bans once per boot (latch survives map changes)
 	if (!g_timedBansReapplied)
@@ -539,6 +563,208 @@ public cmd_ban(id)
 	show_player_menu(id);
 
 	return PLUGIN_HANDLED;
+}
+
+// ===========================================================================
+// Unban Command
+// removeid alone is not enough: writeid persists the removal for permanent
+// filters, and the timed-ban file line must go too or the next boot's
+// reapply silently re-bans (the manual-removeid trap).
+// ===========================================================================
+
+// STEAM_X:Y:Z — X and Y single digits, Z one or more digits. Deliberately
+// strict: exotic shapes can be removeid'd from the console by hand.
+stock bool:is_valid_steamid_shape(const sid[])
+{
+	if (!equal(sid, "STEAM_", 6)) return false;
+	if (!isdigit(sid[6]) || sid[7] != ':') return false;
+	if (!isdigit(sid[8]) || sid[9] != ':') return false;
+	if (!sid[10]) return false;
+	for (new i = 10; sid[i]; i++)
+	{
+		if (!isdigit(sid[i])) return false;
+	}
+	return true;
+}
+
+public cmd_unban(id)
+{
+	if (!(get_user_flags(id) & ADMIN_BAN))
+	{
+		client_print(id, print_chat, "[KTP] You don't have permission to unban players.");
+		log_failed_attempt(id, "unban");
+		return PLUGIN_HANDLED;
+	}
+
+	new args[96];
+	read_args(args, charsmax(args));
+	remove_quotes(args);
+	trim(args);
+
+	// say-path arrives as ".unban STEAM_..." — strip the command token;
+	// the ktp_unban console path arrives as bare args.
+	if (args[0] == '.' || args[0] == '/')
+	{
+		new pos = contain(args, " ");
+		if (pos == -1)
+			args[0] = EOS;
+		else
+		{
+			new stripped[96];
+			copy(stripped, charsmax(stripped), args[pos + 1]);
+			copy(args, charsmax(args), stripped);
+			trim(args);
+		}
+	}
+
+	// Strict STEAM_X:Y:Z shape — nothing else may reach server_cmd. The
+	// command buffer splits on ';' outside quotes, so a loose prefix check
+	// would let an ADMIN_BAN admin smuggle ADMIN_RCON-tier commands
+	// (`.unban STEAM_0:0:1;quit`) past both the privilege gate and the
+	// audit trail; an unmatched '"' could swallow adjacent buffered cmds.
+	if (!is_valid_steamid_shape(args))
+	{
+		client_print(id, print_chat, "[KTP] Usage: .unban STEAM_0:X:Y");
+		return PLUGIN_HANDLED;
+	}
+
+	new adminName[32], adminAuth[44];
+	get_user_name(id, adminName, charsmax(adminName));
+	get_user_authid(id, adminAuth, charsmax(adminAuth));
+
+	// In-memory filter now; writeid (persists the removal of permanent
+	// filters) rides the same deferred task the ban path uses — engine ban
+	// files are disk I/O too. The timed-ban file line goes via the deferred
+	// rewrite.
+	server_cmd("removeid %s", args);
+	server_exec();
+	remove_task(TASK_FLUSH_BANLIST);
+	set_task(0.1, "task_flush_banlist", TASK_FLUSH_BANLIST);
+	queue_timed_ban_removal(args);
+
+	client_print(id, print_chat, "[KTP] Unbanned %s (filter removed; persisted-record removal queued).", args);
+	log_amx("[KTP] UNBAN target=%s admin='%s' admin_steamid=%s", args, adminName, adminAuth);
+
+	new description[256];
+	formatex(description, charsmax(description),
+		"**Admin:** %s (`%s`)^n**Target:** `%s`^n**Action:** removeid + writeid + timed-ban record removal",
+		adminName, adminAuth, args);
+	ktp_discord_send_embed_audit("<:ktp:1105490705188659272> Admin UNBAN", description, KTP_DISCORD_COLOR_ORANGE);
+
+	return PLUGIN_HANDLED;
+}
+
+queue_timed_ban_removal(const sid[])
+{
+	// Chronology: an unban supersedes any same-sid ban line still waiting to
+	// be appended. Prefix compare against "sid|" — sid is field 1 and can't
+	// contain '|'.
+	new sidLen = strlen(sid);
+	for (new i = 0; i < g_pendingBanLineCount; i++)
+	{
+		if (equal(g_pendingBanLines[i], sid, sidLen) && g_pendingBanLines[i][sidLen] == '|')
+		{
+			// compact the pending array over the superseded line
+			for (new j = i + 1; j < g_pendingBanLineCount; j++)
+				copy(g_pendingBanLines[j - 1], charsmax(g_pendingBanLines[]), g_pendingBanLines[j]);
+			g_pendingBanLineCount--;
+			i--;
+		}
+	}
+
+	// Already queued? (double .unban)
+	for (new i = 0; i < g_pendingUnbanCount; i++)
+	{
+		if (equal(g_pendingUnbanSids[i], sid))
+			return;
+	}
+
+	if (g_pendingUnbanCount >= MAX_PENDING_BAN_RECORDS)
+		task_flush_unbans();
+
+	copy(g_pendingUnbanSids[g_pendingUnbanCount], charsmax(g_pendingUnbanSids[]), sid);
+	g_pendingUnbanCount++;
+
+	remove_task(TASK_FLUSH_UNBANS);
+	set_task(0.1, "task_flush_unbans", TASK_FLUSH_UNBANS);
+}
+
+public task_flush_unbans()
+{
+	if (g_pendingUnbanCount <= 0)
+		return;
+
+	new path[192];
+	get_timed_bans_path(path, charsmax(path));
+
+	new file = fopen(path, "r");
+	if (!file)
+	{
+		// No file = nothing persisted = nothing to remove.
+		g_pendingUnbanCount = 0;
+		return;
+	}
+
+	// Same static-buffer approach as reapply_timed_bans — too big for the
+	// AMX stack, touched only on unban.
+	static keptLines[MAX_TIMED_BANS][192];
+	new keptCount = 0, removedCount = 0;
+	new line[192];
+	while (!feof(file) && keptCount < MAX_TIMED_BANS)
+	{
+		fgets(file, line, charsmax(line));
+		trim(line);
+		if (!line[0])
+			continue;
+
+		// Prefix compare against "sid|" — sid is field 1, can't contain '|'.
+		new bool:drop = false;
+		for (new i = 0; i < g_pendingUnbanCount; i++)
+		{
+			new sidLen = strlen(g_pendingUnbanSids[i]);
+			if (equal(line, g_pendingUnbanSids[i], sidLen) && line[sidLen] == '|')
+			{
+				drop = true;
+				break;
+			}
+		}
+		if (drop)
+		{
+			removedCount++;
+			continue;
+		}
+		copy(keptLines[keptCount], charsmax(keptLines[]), line);
+		keptCount++;
+	}
+	new bool:hitCap = (keptCount >= MAX_TIMED_BANS && !feof(file));
+	fclose(file);
+
+	if (removedCount == 0)
+	{
+		// Nothing matched (permanent-only ban, or no record) — leave the
+		// file untouched: no needless rewrite, no crash window, and the
+		// cap can't silently prune unrelated bans on a no-op.
+		g_pendingUnbanCount = 0;
+		return;
+	}
+
+	if (hitCap)
+		log_amx("[KTP] WARNING: %s has more than %d timed bans - extra entries dropped AND removed from the file at rewrite", path, MAX_TIMED_BANS);
+
+	// In-place "w" rewrite: same accepted boot/crash window as
+	// reapply_timed_bans (comment there).
+	new out = fopen(path, "w");
+	if (out)
+	{
+		for (new i = 0; i < keptCount; i++)
+			fprintf(out, "%s^n", keptLines[i]);
+		fclose(out);
+	}
+
+	for (new i = 0; i < g_pendingUnbanCount; i++)
+		log_amx("[KTP] TIMED_BAN_UNBAN_REMOVED sid=%s", g_pendingUnbanSids[i]);
+	log_amx("[KTP] Timed-ban file rewritten after unban: kept=%d removed=%d", keptCount, removedCount);
+	g_pendingUnbanCount = 0;
 }
 
 // ===========================================================================
@@ -1011,6 +1237,18 @@ get_timed_bans_path(path[], len)
 
 record_timed_ban(const targetAuth[], const targetName[], const adminAuth[], const adminName[], durationMin)
 {
+	// Chronology: a re-ban supersedes any same-sid pending unban removal.
+	for (new i = 0; i < g_pendingUnbanCount; i++)
+	{
+		if (equal(g_pendingUnbanSids[i], targetAuth))
+		{
+			for (new j = i + 1; j < g_pendingUnbanCount; j++)
+				copy(g_pendingUnbanSids[j - 1], charsmax(g_pendingUnbanSids[]), g_pendingUnbanSids[j]);
+			g_pendingUnbanCount--;
+			break;
+		}
+	}
+
 	if (g_pendingBanLineCount >= MAX_PENDING_BAN_RECORDS)
 	{
 		// 4+ bans inside one 0.1s window: flush inline rather than lose a
