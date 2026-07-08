@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.15
+/* KTP Admin Audit v2.7.16
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.15
- * DATE: 2026-07-06
+ * VERSION: 2.7.16
+ * DATE: 2026-07-08
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -49,7 +49,38 @@
  *   discord_channel_id_audit*
  *   discord_channel_id_admin
  *
+ * Timed-ban persistence file: <configsdir>/ktp_timed_bans.ini
+ * (engine writeid only saves permanent filters; timed bans are recorded with
+ * their unban epoch and re-applied at boot for the remaining time)
+ *
  * ========== CHANGELOG ==========
+ * v2.7.16 (2026-07-08) - Wave-2 fixes: stale changemap lock, actor re-check,
+ *                        timed-ban persistence, RCON failure batching
+ *   * FIXED: .changemap lock survived map changes (globals persist in extension
+ *     mode) with a gametime stamp from the previous map — negative lockAge
+ *     defeated the 15s timeout, letting a stale lock supersede ANY changelevel
+ *     (incl. match half transitions) for ~20min of new-map gametime. Lock
+ *     globals now reset in plugin_cfg; timeout treats negative age as expired.
+ *   * FIXED: acting admin's flags now re-checked at kick/ban execute time
+ *     (2.7.15 covered target immunity; a de-authed admin could still finish
+ *     a queued action).
+ *   + ADDED: timed-ban persistence via ktp_timed_bans.ini — timed bans died at
+ *     the nightly restart because writeid only saves permanent filters. Each
+ *     timed ban is recorded with its unban epoch and re-applied at boot for
+ *     the remaining minutes; expired entries are dropped and logged.
+ *   + ADDED: failed RCON auth attempts (is_valid=false, fires on .928+ engine)
+ *     are now consumed — each logged locally, batched per source IP into ONE
+ *     Discord summary embed per 60s window (relay has no queue).
+ *   * FIXED: kick-only drop reason no longer claims a ban duration.
+ *   * FIXED: console _restart is now audited like other control commands
+ *     (our own .restart-issued _restart is debounced, not double-logged).
+ *   * FIXED: ban menu state cleared when the target disconnects mid-menu;
+ *     g_validPlayerCount now cleared on disconnect.
+ *   * FIXED: one-frame window at countdown zero where a second .changemap
+ *     could start before the queued changelevel flushed — the lock is now
+ *     held through the changelevel and cleared on the new map.
+ *   * CHANGED: countdown HUD/chat announcements use the map display name.
+ *
  * v2.7.15 (2026-07-06) - Ban-flow immunity re-check + label/comment fixes
  *   * FIXED: immunity checked only at player-select — flags granted between
  *     the select and duration menus (re-auth, live grant) could still ban an
@@ -224,7 +255,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN_NAME    "KTP Admin Audit"
-#define PLUGIN_VERSION "2.7.15"
+#define PLUGIN_VERSION "2.7.16"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Menu action constants
@@ -258,14 +289,48 @@ new const g_banDurationNames[][] = { "1 Hour", "1 Day", "1 Week", "Permanent" };
 #define TASK_RESTART 54323            // Delayed server restart
 #define TASK_QUIT 54324               // Delayed server quit
 #define TASK_FLUSH_BANLIST 54325      // Deferred writeid after ban
+#define TASK_RCON_FAIL_FLUSH 54326    // Batched RCON failure summary
+#define TASK_FLUSH_BAN_RECORDS 54327  // Deferred timed-ban record append
+
+// Timed-ban records are buffered and appended 0.1s later (same pattern as
+// task_flush_banlist) so the fopen/fprintf/fclose never runs on the game
+// thread inside the menu-handler frame — mid-match bans are exactly when a
+// consumer-SSD journal stall would hurt.
+#define MAX_PENDING_BAN_RECORDS 4
+new g_pendingBanLines[MAX_PENDING_BAN_RECORDS][192];
+new g_pendingBanLineCount = 0;
 
 // Changelevel hook variables
 new g_pendingChangeMap[64];          // Map to change to after countdown
+new g_pendingChangeMapDisplay[32];   // Display name for HUD/chat announcements
 new g_changeMapCountdown = 0;        // Countdown seconds remaining
 new bool:g_changeMapInProgress = false; // Lock to prevent concurrent .changemap requests
 new Float:g_changeMapLockTime = 0.0;   // Timestamp when lock was set (for safety timeout)
 const CHANGELEVEL_COUNTDOWN_SECS = 5;   // Seconds to wait before map change
 const Float:CHANGELEVEL_LOCK_TIMEOUT = 15.0; // Safety timeout to prevent permanent lock
+
+// Debounces the ExecuteServerStringCmd audit for the _restart we issue
+// ourselves from .restart (already audited by cmd_restart)
+new bool:g_ownRestartPending = false;
+
+// Timed-ban persistence — engine writeid only saves permanent filters
+// (banTime==0), so a timed banid evaporates at the nightly restart. Every
+// timed ban is recorded with its unban epoch and re-applied at boot.
+#define TIMED_BANS_FILE "ktp_timed_bans.ini"
+#define MAX_TIMED_BANS 64
+new bool:g_timedBansReapplied = false; // globals persist across map changes — latches reapply to once per boot
+
+// RCON failure batching — the Discord relay has no queue and failed-rcon
+// storms can hit 60/min (over Discord limits), so failures accumulate per
+// source IP and flush as ONE summary embed per 60s window.
+#define MAX_RCON_FAIL_IPS 16
+new g_rconFailIp[MAX_RCON_FAIL_IPS][24];      // "ip:port" fits 22 chars
+new g_rconFailCount[MAX_RCON_FAIL_IPS];
+new g_rconFailFirst[MAX_RCON_FAIL_IPS];       // systime of first failure in window
+new g_rconFailLast[MAX_RCON_FAIL_IPS];        // systime of latest failure
+new g_rconFailLastCmd[MAX_RCON_FAIL_IPS][32]; // command name only (passwords stripped engine-side)
+new g_rconFailIpCount = 0;
+new g_rconFailOverflow = 0;                   // failures from IPs past table capacity
 
 public plugin_init()
 {
@@ -318,6 +383,11 @@ public plugin_init()
 	// Register console changelevel hook (KTP-ReHLDS) - intercepts server_cmd("changelevel") for countdown
 	RegisterHookChain(RH_Host_Changelevel_f, "hook_Host_Changelevel_f", false);
 
+	// Tasks are cleared on map change — re-register the failure-summary window
+	// every map. Window data lives in globals, so it survives the change.
+	remove_task(TASK_RCON_FAIL_FLUSH);
+	set_task(60.0, "task_flush_rcon_failures", TASK_RCON_FAIL_FLUSH, .flags = "b");
+
 	set_task(0.1, "task_log_init");
 }
 
@@ -333,6 +403,25 @@ public plugin_cfg()
 
 	// Load map list from ktp_maps.ini
 	load_map_list();
+
+	// Globals persist across map changes in extension mode — a lock carried
+	// over holds a gametime stamp from the PREVIOUS map's clock, which reads
+	// as negative age on the new map and would supersede every changelevel.
+	// Always start a map with the lock clear.
+	reset_changemap_lock();
+
+	// A ban recorded <0.1s before a changelevel loses its flush task to the
+	// per-map task clear; the buffered lines survive in globals, so flush
+	// them on the new map before anything else touches the file.
+	if (g_pendingBanLineCount > 0)
+		task_flush_ban_records();
+
+	// Re-apply persisted timed bans once per boot (latch survives map changes)
+	if (!g_timedBansReapplied)
+	{
+		g_timedBansReapplied = true;
+		reapply_timed_bans();
+	}
 }
 
 public client_putinserver(id)
@@ -363,7 +452,29 @@ public client_disconnected(id)
 	g_menuTarget[id] = 0;
 	g_menuTargetAuth[id][0] = EOS;
 	g_menuPage[id] = 0;
+	g_validPlayerCount[id] = 0;
 	remove_task(id + TASK_VERSION_BASE);
+
+	// Cancel any admin mid-kick/ban-flow on this target — the slot can be
+	// recycled before they finish. The auth TOCTOU guard would catch the swap
+	// at execute, but the dangling state kept a stale duration menu alive.
+	// Scoped to kick/ban: g_menuTarget can hold a stale slot from a COMPLETED
+	// action (nothing clears it on finish), so matching other action types
+	// would cross-fire on unrelated menus (e.g. .changemap).
+	for (new admin = 1; admin <= MAX_PLAYERS; admin++)
+	{
+		if (admin == id)
+			continue;
+		if ((g_menuAction[admin] == ACTION_KICK || g_menuAction[admin] == ACTION_BAN)
+			&& g_menuTarget[admin] == id)
+		{
+			g_menuAction[admin] = ACTION_NONE;
+			g_menuTarget[admin] = 0;
+			g_menuTargetAuth[admin][0] = EOS;
+			if (is_user_connected(admin))
+				client_print(admin, print_chat, "[KTP] Target player disconnected - action cancelled.");
+		}
+	}
 }
 
 // ===========================================================================
@@ -387,8 +498,11 @@ public cmd_kick(id)
 		return PLUGIN_HANDLED;
 	}
 
-	// Show player selection menu
+	// Show player selection menu — clear any stale target so the disconnect
+	// sweep only matches a real selection from THIS flow
 	g_menuAction[id] = ACTION_KICK;
+	g_menuTarget[id] = 0;
+	g_menuTargetAuth[id][0] = EOS;
 	g_menuPage[id] = 0;
 	show_player_menu(id);
 
@@ -416,8 +530,11 @@ public cmd_ban(id)
 		return PLUGIN_HANDLED;
 	}
 
-	// Show player selection menu
+	// Show player selection menu — clear any stale target so the disconnect
+	// sweep only matches a real selection from THIS flow
 	g_menuAction[id] = ACTION_BAN;
+	g_menuTarget[id] = 0;
+	g_menuTargetAuth[id][0] = EOS;
 	g_menuPage[id] = 0;
 	show_player_menu(id);
 
@@ -677,6 +794,16 @@ public menu_duration_handler(id, key)
 
 execute_kick(admin_id, target_id)
 {
+	// Actor re-check: flags can be revoked between menu open and execute
+	// (2.7.15 re-checked target immunity; the actor needs the same treatment)
+	if (!(get_user_flags(admin_id) & ADMIN_KICK))
+	{
+		client_print(admin_id, print_chat, "[KTP] You no longer have permission to kick players.");
+		log_failed_attempt(admin_id, "kick (at execute)");
+		g_menuAction[admin_id] = ACTION_NONE;
+		return;
+	}
+
 	// TOCTOU guard: verify slot still holds the same player selected in menu
 	new currentAuth[35];
 	get_user_authid(target_id, currentAuth, charsmax(currentAuth));
@@ -725,6 +852,16 @@ execute_kick(admin_id, target_id)
 
 execute_ban(admin_id, target_id, duration)
 {
+	// Actor re-check: flags can be revoked between menu open and execute
+	// (2.7.15 re-checked target immunity; the actor needs the same treatment)
+	if (!(get_user_flags(admin_id) & ADMIN_BAN))
+	{
+		client_print(admin_id, print_chat, "[KTP] You no longer have permission to ban players.");
+		log_failed_attempt(admin_id, "ban (at execute)");
+		g_menuAction[admin_id] = ACTION_NONE;
+		return;
+	}
+
 	// TOCTOU guard: verify slot still holds the same player selected in menu
 	new currentAuth[35];
 	get_user_authid(target_id, currentAuth, charsmax(currentAuth));
@@ -829,11 +966,20 @@ execute_ban(admin_id, target_id, duration)
 		server_exec();
 		remove_task(TASK_FLUSH_BANLIST);
 		set_task(0.1, "task_flush_banlist", TASK_FLUSH_BANLIST);
+
+		// writeid only persists permanent filters — record timed bans so boot
+		// can re-apply the remainder
+		if (duration > 0)
+			record_timed_ban(targetAuth, targetName, adminAuth, adminName, duration);
 	}
 
 	// Drop the client using ReHLDS DropClient API (bypasses blocked kick command)
+	// A kick-only drop must never claim a ban duration
 	new banReason[64];
-	formatex(banReason, charsmax(banReason), "%s by admin (%s)", invalidSteamId ? "Kicked" : "Banned", durationStr);
+	if (invalidSteamId)
+		copy(banReason, charsmax(banReason), "Kicked by admin");
+	else
+		formatex(banReason, charsmax(banReason), "Banned by admin (%s)", durationStr);
 	ktp_drop_client(target_id, banReason);
 
 	g_menuAction[admin_id] = ACTION_NONE;
@@ -844,6 +990,185 @@ public task_flush_banlist()
 {
 	server_cmd("writeid");
 	server_exec();
+}
+
+// ===========================================================================
+// Timed-Ban Persistence
+// The engine's SV_WriteId_f writes only permanent filters (banTime==0), so a
+// timed banid silently dies at the nightly restart. We own persistence: every
+// timed ban appends a record here; boot re-applies the remaining minutes.
+// Record format (one per line, names last so a '|' in a name can't corrupt
+// the load-bearing fields):
+//   steamid|unban_epoch|admin_steamid|target_name|admin_name
+// ===========================================================================
+
+get_timed_bans_path(path[], len)
+{
+	new configsDir[128];
+	get_configsdir(configsDir, charsmax(configsDir));
+	formatex(path, len, "%s/%s", configsDir, TIMED_BANS_FILE);
+}
+
+record_timed_ban(const targetAuth[], const targetName[], const adminAuth[], const adminName[], durationMin)
+{
+	if (g_pendingBanLineCount >= MAX_PENDING_BAN_RECORDS)
+	{
+		// 4+ bans inside one 0.1s window: flush inline rather than lose a
+		// record — the stall risk beats a silent drop.
+		task_flush_ban_records();
+	}
+
+	formatex(g_pendingBanLines[g_pendingBanLineCount], charsmax(g_pendingBanLines[]),
+		"%s|%d|%s|%s|%s",
+		targetAuth, get_systime() + durationMin * 60, adminAuth, targetName, adminName);
+	g_pendingBanLineCount++;
+
+	remove_task(TASK_FLUSH_BAN_RECORDS);
+	set_task(0.1, "task_flush_ban_records", TASK_FLUSH_BAN_RECORDS);
+}
+
+public task_flush_ban_records()
+{
+	if (g_pendingBanLineCount <= 0)
+		return;
+
+	new path[192];
+	get_timed_bans_path(path, charsmax(path));
+
+	new file = fopen(path, "a");
+	if (!file)
+	{
+		log_amx("[KTP] WARNING: Could not open %s - %d timed ban record(s) will not survive a restart",
+			path, g_pendingBanLineCount);
+		g_pendingBanLineCount = 0;
+		return;
+	}
+
+	for (new i = 0; i < g_pendingBanLineCount; i++)
+		fprintf(file, "%s^n", g_pendingBanLines[i]);
+	fclose(file);
+	g_pendingBanLineCount = 0;
+}
+
+// Boot-time re-apply: read records, drop expired ones (rewrite the file
+// without them), banid the remainder. Duplicate steamids: latest line wins.
+// No writeid — re-application every boot carries the persistence.
+reapply_timed_bans()
+{
+	new path[192];
+	get_timed_bans_path(path, charsmax(path));
+
+	new file = fopen(path, "r");
+	if (!file)
+		return; // fresh install or no timed bans recorded
+
+	// static: too large for the AMX stack; only touched once per boot
+	static sids[MAX_TIMED_BANS][35];
+	static epochs[MAX_TIMED_BANS];
+	static rawLines[MAX_TIMED_BANS][160];
+	new count = 0, malformed = 0;
+
+	new line[160];
+	while (fgets(file, line, charsmax(line)))
+	{
+		trim(line);
+		if (!line[0] || line[0] == ';' || line[0] == '#')
+			continue;
+
+		// steamid|unban_epoch|...
+		new pipe1 = contain(line, "|");
+		new bool:ok = (pipe1 > 0);
+		new sid[35], epoch = 0;
+		if (ok)
+		{
+			copy(sid, min(pipe1, charsmax(sid)), line);
+			new epochStart = pipe1 + 1;
+			new pipe2 = contain(line[epochStart], "|");
+			if (pipe2 > 0)
+			{
+				new epochStr[16];
+				copy(epochStr, min(pipe2, charsmax(epochStr)), line[epochStart]);
+				epoch = str_to_num(epochStr);
+			}
+			// only persistent Steam IDs are ever recorded
+			ok = (epoch > 0 && equal(sid, "STEAM_", 6));
+		}
+		if (!ok)
+		{
+			malformed++;
+			log_amx("[KTP] TIMED_BAN_MALFORMED skipped: '%s'", line);
+			continue;
+		}
+
+		// latest-wins dedup
+		new idx = -1;
+		for (new i = 0; i < count; i++)
+		{
+			if (equal(sids[i], sid))
+			{
+				idx = i;
+				break;
+			}
+		}
+		if (idx == -1)
+		{
+			if (count >= MAX_TIMED_BANS)
+			{
+				log_amx("[KTP] WARNING: %s has more than %d timed bans - extra entries dropped AND removed from the file at rewrite", path, MAX_TIMED_BANS);
+				continue;
+			}
+			idx = count++;
+			copy(sids[idx], charsmax(sids[]), sid);
+		}
+		epochs[idx] = epoch;
+		copy(rawLines[idx], charsmax(rawLines[]), line);
+	}
+	fclose(file);
+
+	// Apply live entries, collect which to keep
+	new now = get_systime();
+	new applied = 0, expired = 0;
+	static bool:keep[MAX_TIMED_BANS];
+	for (new i = 0; i < count; i++)
+	{
+		new remaining = epochs[i] - now;
+		if (remaining <= 0)
+		{
+			keep[i] = false;
+			expired++;
+			log_amx("[KTP] TIMED_BAN_EXPIRED sid=%s (dropped from %s)", sids[i], TIMED_BANS_FILE);
+			continue;
+		}
+		keep[i] = true;
+		new remainingMin = (remaining + 59) / 60; // round up — never under-ban
+		server_cmd("banid %d %s", remainingMin, sids[i]);
+		log_amx("[KTP] TIMED_BAN_REAPPLY sid=%s remaining_min=%d", sids[i], remainingMin);
+		applied++;
+	}
+	// No server_exec() — the buffered banids flush on the next engine frame,
+	// long before any client can finish connecting at boot.
+
+	// Rewrite without expired/duplicate/malformed lines. In-place "w" rewrite:
+	// a crash between truncate and fclose loses the file — accepted (boot-only,
+	// ms-wide window, bans also live in the engine's in-memory list until the
+	// next stop).
+	new out = fopen(path, "w");
+	if (!out)
+	{
+		log_amx("[KTP] WARNING: Could not rewrite %s - expired entries not pruned", path);
+	}
+	else
+	{
+		for (new i = 0; i < count; i++)
+		{
+			if (keep[i])
+				fprintf(out, "%s^n", rawLines[i]);
+		}
+		fclose(out);
+	}
+
+	if (applied || expired || malformed)
+		log_amx("[KTP] Timed-ban persistence: %d re-applied, %d expired, %d malformed", applied, expired, malformed);
 }
 
 // ===========================================================================
@@ -866,9 +1191,13 @@ log_failed_attempt(id, const action[])
 
 public hook_SV_Rcon(const command[], const from_ip[], bool:is_valid)
 {
-	// Only process valid RCON commands (invalid ones are already logged by engine)
+	// Failed auth (fires on .928+ engines): consume with batching — one
+	// summary embed per 60s window, never one embed per failure
 	if (!is_valid)
+	{
+		record_rcon_failure(command, from_ip);
 		return HC_CONTINUE;
+	}
 
 	// Check for server control commands that we want to audit/block
 	new cmd[32];
@@ -913,6 +1242,96 @@ public hook_SV_Rcon(const command[], const from_ip[], bool:is_valid)
 }
 
 // ===========================================================================
+// RCON Failure Batching
+// Every failure gets a local log line (log_amx is async-safe on this fleet);
+// Discord sees ONE per-IP summary per 60s window — the relay has no queue
+// and failure storms can exceed Discord limits.
+// ===========================================================================
+
+record_rcon_failure(const command[], const from_ip[])
+{
+	// Passwords are stripped engine-side; keep just the command name
+	new cmd[32];
+	copy(cmd, charsmax(cmd), command);
+	trim(cmd);
+	new space = contain(cmd, " ");
+	if (space != -1)
+		cmd[space] = 0;
+
+	log_amx("[KTP] RCON AUTH FAIL from %s (cmd: '%s')", from_ip, cmd);
+
+	new idx = -1;
+	for (new i = 0; i < g_rconFailIpCount; i++)
+	{
+		if (equal(g_rconFailIp[i], from_ip))
+		{
+			idx = i;
+			break;
+		}
+	}
+	if (idx == -1)
+	{
+		if (g_rconFailIpCount >= MAX_RCON_FAIL_IPS)
+		{
+			g_rconFailOverflow++;
+			return;
+		}
+		idx = g_rconFailIpCount++;
+		copy(g_rconFailIp[idx], charsmax(g_rconFailIp[]), from_ip);
+		g_rconFailCount[idx] = 0;
+		g_rconFailFirst[idx] = get_systime();
+	}
+	g_rconFailCount[idx]++;
+	g_rconFailLast[idx] = get_systime();
+	copy(g_rconFailLastCmd[idx], charsmax(g_rconFailLastCmd[]), cmd);
+}
+
+public task_flush_rcon_failures()
+{
+	if (g_rconFailIpCount == 0 && g_rconFailOverflow == 0)
+		return; // quiet window — no embed
+
+	new total = g_rconFailOverflow;
+	for (new i = 0; i < g_rconFailIpCount; i++)
+		total += g_rconFailCount[i];
+
+	// "Audited": the engine throttles failure audits (~1/s global), so these
+	// counts are a floor — a brute-force storm shows ~60/window regardless of
+	// its real rate. The local per-failure log has the same ceiling.
+	new description[768], len = 0;
+	new now = get_systime();
+	len = formatex(description, charsmax(description),
+		"**Audited failed attempts (last 60s):** %d from %d IP%s",
+		total, g_rconFailIpCount, g_rconFailIpCount == 1 ? "" : "s");
+
+	for (new i = 0; i < g_rconFailIpCount; i++)
+	{
+		len += formatex(description[len], charsmax(description) - len,
+			"^n`%s` — %d attempt%s (first %ds ago, last %ds ago, last cmd: `%s`)",
+			g_rconFailIp[i], g_rconFailCount[i], g_rconFailCount[i] == 1 ? "" : "s",
+			now - g_rconFailFirst[i], now - g_rconFailLast[i],
+			g_rconFailLastCmd[i][0] ? g_rconFailLastCmd[i] : "(none)");
+
+		if (len >= charsmax(description) - 128)
+		{
+			len += formatex(description[len], charsmax(description) - len, "^n(list truncated)");
+			break;
+		}
+	}
+	if (g_rconFailOverflow)
+		formatex(description[len], charsmax(description) - len,
+			"^n(+%d attempts from IPs beyond table capacity)", g_rconFailOverflow);
+
+	log_amx("[KTP] RCON failure window flushed: %d attempts from %d IPs (+%d overflow)",
+		total - g_rconFailOverflow, g_rconFailIpCount, g_rconFailOverflow);
+	ktp_discord_send_embed_audit("<:ktp:1105490705188659272> RCON Auth Failures", description, KTP_DISCORD_COLOR_RED);
+
+	// Reset the window
+	g_rconFailIpCount = 0;
+	g_rconFailOverflow = 0;
+}
+
+// ===========================================================================
 // Console Command Audit Hook (catches LinuxGSM quit/restart via tmux)
 // ===========================================================================
 
@@ -928,13 +1347,20 @@ public hook_ExecuteServerStringCmd(const cmd[], source, id)
 	if (space != -1)
 		command[space] = 0;
 
-	// Skip _restart - it's triggered by admin .restart command which already logs
-	// Also skip from RCON source (1) - already caught by RH_SV_Rcon hook
-	if (equal(command, "_restart") || source == 1)
+	// Skip RCON source (1) - already caught by RH_SV_Rcon hook
+	if (source == 1)
 		return HC_CONTINUE;
 
+	// Skip only OUR OWN _restart (already audited by cmd_restart); any other
+	// console _restart is a server control command like the rest
+	if (equal(command, "_restart") && g_ownRestartPending)
+	{
+		g_ownRestartPending = false;
+		return HC_CONTINUE;
+	}
+
 	// Log quit/exit/restart commands to Discord (LinuxGSM console commands)
-	if (equal(command, "quit") || equal(command, "exit") || equal(command, "restart"))
+	if (equal(command, "quit") || equal(command, "exit") || equal(command, "restart") || equal(command, "_restart"))
 	{
 		// Determine source description
 		new sourceStr[32];
@@ -999,6 +1425,10 @@ public cmd_restart(id)
 
 public fn_execute_restart(taskid)
 {
+	// Debounce the console-audit hook for this one _restart — cmd_restart
+	// already sent the audit embed. The hook fires inside server_exec below,
+	// so the flag's lifetime is this call.
+	g_ownRestartPending = true;
 	server_cmd("_restart");
 	server_exec();
 }
@@ -1156,11 +1586,23 @@ public cmd_changemap(id)
 		return PLUGIN_HANDLED;
 	}
 
-	// Block if a changemap is already in progress (prevents race condition crash)
+	// Block if a changemap is already in progress (prevents race condition crash).
+	// The lock is now held through the queued changelevel and normally cleared
+	// by plugin_cfg on the new map — if the changelevel somehow never ran, a
+	// wedged lock self-heals here on the same timeout the hook uses.
 	if (g_changeMapInProgress)
 	{
-		client_print(id, print_chat, "[KTP] Map change already in progress. Please wait.");
-		return PLUGIN_HANDLED;
+		new Float:lockAge = get_gametime() - g_changeMapLockTime;
+		if (lockAge < 0.0 || lockAge > CHANGELEVEL_LOCK_TIMEOUT)
+		{
+			log_amx("[KTP] WARNING: Changelevel lock expired after %.1f seconds - resetting (was locked for '%s')", lockAge, g_pendingChangeMap);
+			reset_changemap_lock();
+		}
+		else
+		{
+			client_print(id, print_chat, "[KTP] Map change already in progress. Please wait.");
+			return PLUGIN_HANDLED;
+		}
 	}
 
 	if (g_mapCount == 0)
@@ -1321,6 +1763,7 @@ execute_changemap(admin_id, const mapName[], const displayName[])
 	// (Previously used a roundabout server_cmd → hook → supercede → start_countdown path,
 	// but set_task inside hookchain handlers intermittently failed to register)
 	copy(g_pendingChangeMap, charsmax(g_pendingChangeMap), mapName);
+	copy(g_pendingChangeMapDisplay, charsmax(g_pendingChangeMapDisplay), displayName);
 
 	// Start countdown directly — after 5 seconds, task_changelevel_countdown will
 	// call server_cmd("changelevel") which goes through the hook normally
@@ -1345,13 +1788,12 @@ public hook_Host_Changelevel_f(const map[], const startspot[])
 
 		// Safety timeout: if the lock has been held too long, something went wrong
 		// (e.g., countdown task failed to fire after plugin reload). Reset and allow.
+		// Negative age = stamp from a previous map's clock (gametime restarts per
+		// map) — treat as expired, never as fresh.
 		new Float:lockAge = get_gametime() - g_changeMapLockTime;
-		if (lockAge > CHANGELEVEL_LOCK_TIMEOUT) {
+		if (lockAge < 0.0 || lockAge > CHANGELEVEL_LOCK_TIMEOUT) {
 			log_amx("[KTP] WARNING: Changelevel lock expired after %.1f seconds - resetting (was locked for '%s')", lockAge, g_pendingChangeMap);
-			g_changeMapInProgress = false;
-			g_changeMapCountdown = 0;
-			remove_task(TASK_CHANGELEVEL);
-			remove_task(TASK_CHANGELEVEL_SAFETY);
+			reset_changemap_lock();
 			return HC_CONTINUE;
 		}
 		log_amx("[KTP] Blocked changelevel to '%s' - changemap to '%s' already in progress (%.1fs ago)", map, g_pendingChangeMap, lockAge);
@@ -1360,6 +1802,19 @@ public hook_Host_Changelevel_f(const map[], const startspot[])
 
 	// Not our changelevel - allow it (could be from match end, vote, etc.)
 	return HC_CONTINUE;
+}
+
+// Clear all changemap lock state — called per map from plugin_cfg (globals
+// persist across map changes in extension mode) and on lock timeout
+reset_changemap_lock()
+{
+	g_changeMapInProgress = false;
+	g_changeMapCountdown = 0;
+	g_changeMapLockTime = 0.0;
+	g_pendingChangeMap[0] = EOS;
+	g_pendingChangeMapDisplay[0] = EOS;
+	remove_task(TASK_CHANGELEVEL);
+	remove_task(TASK_CHANGELEVEL_SAFETY);
 }
 
 // Start the countdown before map change
@@ -1377,9 +1832,10 @@ stock start_changelevel_countdown()
 	log_amx("[KTP] Changelevel countdown started: %d seconds to %s",
 		CHANGELEVEL_COUNTDOWN_SECS, g_pendingChangeMap);
 
-	// Initial HUD announcement
+	// Initial HUD announcement (display name; raw filename stays in the logs)
 	set_hudmessage(255, 255, 0, -1.0, 0.35, 0, 0.0, 0.9, 0.0, 0.0, -1);
-	show_hudmessage(0, "Map changing to %s in %d...", g_pendingChangeMap, g_changeMapCountdown);
+	show_hudmessage(0, "Map changing to %s in %d...",
+		g_pendingChangeMapDisplay[0] ? g_pendingChangeMapDisplay : g_pendingChangeMap, g_changeMapCountdown);
 }
 
 // Countdown task for map change
@@ -1392,8 +1848,11 @@ public task_changelevel_countdown()
 		remove_task(TASK_CHANGELEVEL);
 		remove_task(TASK_CHANGELEVEL_SAFETY);
 
-		// Reset the in-progress flag BEFORE executing changelevel
-		g_changeMapInProgress = false;
+		// Keep the lock held: the queued changelevel flushes NEXT frame, and
+		// clearing here opened a one-frame window where a second .changemap
+		// could start and overwrite the pending state. The hook lets our own
+		// (same-map) changelevel through; plugin_cfg clears the lock on the
+		// new map, and the timeout self-heal covers a changelevel that dies.
 
 		// Execute the changelevel
 		log_amx("[KTP] Changelevel countdown complete - executing changelevel to %s", g_pendingChangeMap);
@@ -1415,9 +1874,10 @@ public task_changelevel_countdown()
 		client_print(0, print_chat, "[KTP] Map changing in %d...", g_changeMapCountdown);
 	}
 
-	// HUD countdown
+	// HUD countdown (display name; raw filename stays in the logs)
 	set_hudmessage(255, 255, 0, -1.0, 0.35, 0, 0.0, 0.9, 0.0, 0.0, -1);
-	show_hudmessage(0, "Map changing to %s in %d...", g_pendingChangeMap, g_changeMapCountdown);
+	show_hudmessage(0, "Map changing to %s in %d...",
+		g_pendingChangeMapDisplay[0] ? g_pendingChangeMapDisplay : g_pendingChangeMap, g_changeMapCountdown);
 }
 
 // Safety fallback: fires if the repeating countdown task failed to register
@@ -1430,7 +1890,8 @@ public task_changelevel_safety()
 	log_amx("[KTP] WARNING: Changelevel countdown task failed - safety fallback executing changelevel to %s", g_pendingChangeMap);
 	remove_task(TASK_CHANGELEVEL);
 
-	g_changeMapInProgress = false;
+	// Lock stays held through the queued changelevel (same one-frame race as
+	// the normal countdown path); plugin_cfg clears it on the new map
 	g_changeMapCountdown = 0;
 	server_cmd("changelevel %s", g_pendingChangeMap);
 	// No server_exec() — see task_changelevel_countdown(): a synchronous exec from

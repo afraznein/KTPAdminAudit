@@ -1,6 +1,6 @@
 # KTP Admin Audit Plugin
 
-**Version:** 2.7.15
+**Version:** 2.7.16
 **Author:** Nein_
 **Date:** July 2026
 
@@ -18,8 +18,9 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 - **Admin Flag Permissions** - Requires ADMIN_KICK (c) or ADMIN_BAN (d) flags
 - **Immunity Protection** - Players with ADMIN_IMMUNITY (a) cannot be kicked/banned
 - **Ban Duration Selection** - 1 hour, 1 day, 1 week, or permanent
+- **Timed-Ban Persistence** - Timed bans survive server restarts via `ktp_timed_bans.ini` (v2.7.16+)
 - **Discord Audit Logging** - Real-time notifications to all configured audit channels
-- **RCON Audit Logging** - Logs restart commands with source IP (v2.2.0+)
+- **RCON Audit Logging** - Logs restart commands with source IP (v2.2.0+); failed RCON auth attempts batched into per-minute Discord summaries (v2.7.16+, ReHLDS .928+)
 - **Console Command Audit** - Catches all console commands including LinuxGSM (v2.3.0+)
 - **Admin Server Commands** - `.restart` / `.quit` with ADMIN_RCON flag (v2.3.0+)
 - **Match Protection** - `.changemap` blocked during active matches (requires KTPMatchHandler)
@@ -109,6 +110,28 @@ name = Charlie
 Only maps that exist on the server (verified via `maps/<mapname>.bsp`) are shown in the menu.
 
 **Limits:** Maximum 64 maps can be loaded from ktp_maps.ini.
+
+### Timed-Ban Persistence (`ktp_timed_bans.ini`)
+
+The engine's `writeid` only saves **permanent** ban filters — a timed `banid` is gone after a server restart (the fleet restarts nightly at 03:00 ET). The plugin owns timed-ban persistence instead:
+
+- Every timed ban appends a record to `<configsdir>/ktp_timed_bans.ini`:
+  ```
+  steamid|unban_epoch|admin_steamid|target_name|admin_name
+  ```
+  `unban_epoch` is a Unix timestamp (`get_systime()` + duration). The names are informational only.
+- At boot the plugin reads the file, **drops expired entries** (rewriting the file without them, logged as `TIMED_BAN_EXPIRED`), dedups duplicate SteamIDs (latest line wins), skips malformed lines (content logged), and re-applies each remaining entry with `banid <remaining_minutes> <steamid>` — logged as `TIMED_BAN_REAPPLY sid=... remaining_min=...`.
+- No `writeid` is issued for these — re-application at every boot carries the persistence. Re-apply runs once per process (not on every map change).
+- **To lift a timed ban early:** `removeid` removes it from the live server, but you must also delete its line from `ktp_timed_bans.ini` or it will be re-applied at the next restart.
+- The file is created on the first timed ban; a missing file is normal.
+
+### Failed-RCON Audit Batching (ReHLDS .928+)
+
+On engines where `SV_Rcon` fires for **failed** auth attempts too (KTP-ReHLDS 3.22.0.928+), the plugin consumes them:
+
+- Every failure is logged locally immediately: `RCON AUTH FAIL from <ip:port> (cmd: '<name>')`. Passwords are stripped engine-side before the hook fires.
+- Discord sees **one summary embed per 60-second window**, and only when the window saw failures — per source IP: attempt count, first/last timestamp, last command name (up to 16 IPs per window, extra attempts counted in an overflow line). The relay has no queue, and brute-force storms can exceed Discord rate limits — never one embed per failure.
+- Valid RCON handling (quit/exit block, restart audit) is unchanged. On .927 engines the failure path never fires; the code is inert.
 
 ### Discord Configuration (`discord.ini`)
 

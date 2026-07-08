@@ -2,6 +2,26 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.16] - 2026-07-08
+
+Fix wave from the 2026-07-06 Wave-2 full-surface assessment (AA-1/AA-2/AA-3/AA-4/AA-5 + the .928 RCON-audit consumer).
+
+### Fixed
+- **Stale `.changemap` lock survived map changes (AA-1, match-integrity)** — globals persist across map changes in extension mode, so a lock set in the last ~10s of a map carried a gametime timestamp from the *previous* map's clock onto the new one. Gametime restarts per map, so `lockAge` computed negative and the 15s timeout never fired — the stale lock could supersede ANY server changelevel (including KTPMatchHandler half transitions) for ~20 minutes of new-map gametime. All lock state (`g_changeMapInProgress`, `g_changeMapLockTime`, countdown, pending map/display name) now resets in `plugin_cfg` on every map, and the timeout check treats `lockAge < 0` as expired.
+- **Acting admin's flags not re-checked at execute (AA-2)** — 2.7.15 closed the *target* immunity TOCTOU but not *actor* auth: an admin de-flagged (re-auth, live revoke) after opening the menu could still finish a queued kick/ban. `execute_kick`/`execute_ban` now re-check `ADMIN_KICK`/`ADMIN_BAN` at execute time and log the denial.
+- **One-frame countdown-zero overwrite race (AA-3)** — the countdown cleared `g_changeMapInProgress` one frame before the queued `changelevel` flushed; a `.changemap` landing in that frame could start a second flow over the first. The lock is now held through the queued changelevel (the hook already passes our own same-map changelevel), cleared by `plugin_cfg` on the new map. A wedged lock self-heals via the existing 15s timeout, now also checked in `cmd_changemap`.
+- **Kick-only drop reason claimed a ban duration (AA-5)** — the invalid-SteamID (kick-only) path handed the client a drop reason with a duration in it. A kick reason never mentions a duration now.
+- **`_restart` console commands skipped by the audit hook** — `hook_ExecuteServerStringCmd` unconditionally skipped `_restart`, so an un-audited console `_restart` was invisible. Only the `_restart` issued by our own `.restart` command (already audited) is debounced; any other `_restart` is now logged and embedded like `quit`/`exit`/`restart`.
+- **Menu state dangled on target disconnect** — an admin sitting in the ban duration menu kept `g_menuTarget`/`g_menuAction` pointing at a disconnected (recyclable) slot; the auth TOCTOU guard masked the worst outcome but the stale menu stayed alive. `client_disconnected` now cancels any admin mid-flow on that target (with a chat notice) and clears the departing player's `g_validPlayerCount`, which was never reset.
+- **Countdown HUD/chat used the raw map filename** — announcements now use the display name from `ktp_maps.ini` (the Discord embed already did); logs keep the raw filename. *Note: the assessment wording said the countdown "Discord embed" used the raw name — in source the embed already used the display name; the raw-name surfaces were the HUD/chat announcements, fixed here.*
+
+### Added
+- **Timed-ban persistence (AA-4, full fix)** — the engine's `SV_WriteId_f` writes only permanent filters (`banTime == 0`), so a "1 Week" ban really lasted until the next 03:00 nightly restart while the audit log and Discord embed claimed the full duration. Every timed ban now appends a record to `<configsdir>/ktp_timed_bans.ini` (`steamid|unban_epoch|admin_steamid|target_name|admin_name`); at boot (`plugin_cfg`, latched to once per process) the file is read, expired entries are dropped and logged (`TIMED_BAN_EXPIRED`), duplicates dedup latest-wins, malformed lines are skipped with their content logged, and each live entry is re-applied via `banid <remaining_minutes> <steamid>` (`TIMED_BAN_REAPPLY sid=... remaining_min=...`, remaining recomputed from the stored epoch, rounded up). No `writeid` — re-application every boot carries it. To fully lift a timed ban early, `removeid` alone is not enough: also delete its line from `ktp_timed_bans.ini`.
+- **Failed-RCON audit with batching (.928 consumer)** — `hook_SV_Rcon` previously discarded `is_valid == false` audits (which fire on ReHLDS .928+; inert on .927). Each failure is now logged locally (`RCON AUTH FAIL`, passwords already stripped engine-side), and accumulated per source IP (count, first/last timestamp, last command name, 16-IP table with overflow counter). A repeating 60s task flushes ONE summary embed per window, and only when the window saw failures — the Discord relay has no queue and failure storms can hit 60/min, past Discord limits. `is_valid == true` handling unchanged.
+
+### Removed
+- **Stale repo-local `amxxpc32.so`** — a glibc-2.38 build that shadowed the fleet compiler when compiling from the repo cwd. Both `compile.sh` and `compile.bat` copy the compiler from the KTPAMXX build tree, so nothing referenced it.
+
 ## [2.7.15] - 2026-07-06
 
 Fix wave from the 2026-07-05 full-stack review (Part 2 P2 items).
