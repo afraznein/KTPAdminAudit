@@ -17,3 +17,6 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# machine-local Claude permissions (skills ARE published)
+.claude/settings.local.json
