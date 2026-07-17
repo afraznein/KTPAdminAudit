@@ -91,6 +91,27 @@ exceed Discord's limits directly. Any consumer that can fire on a hot path
 one summary embed per 60s window, only when the window saw failures) must
 batch, never emit one embed per event.
 
+## Never run a destructive simulation inside the working tree
+Verifying a fix often means simulating the failure — writing a fake `build.sh`, a
+fake artifact, a fake staging dir. Do it in a **verified** scratch dir, never in
+the repo:
+
+```bash
+T="$(mktemp -d)" || exit 1
+[ -n "$T" ] && [ -d "$T" ] || exit 1   # verify BEFORE you cd — this is the whole rule
+cd "$T" || exit 1
+```
+
+`cd "$T"` with an empty `$T` **silently succeeds and leaves you where you were** —
+in the repo. A simulation that then writes `build.sh` overwrites the real one. On
+2026-07-16 exactly that truncated a tracked 60-line upstream file to 2 lines and
+dropped a junk `.so` into `build/`, where a `find | head -1` could have staged it.
+It was caught only because `git status` showed a modification nobody made.
+
+So: verify the scratch dir before `cd`, and **run `git status` after any test that
+touches the filesystem** — an unexpected change is the tell. Prefer copying inputs
+out to the scratch dir over running tools "in place".
+
 ## Workflow
 1. **Version bump** (every shipped change): `#define VERSION` and the header
    comment in the `.sma` (keep both in sync — mismatches have shipped before),
