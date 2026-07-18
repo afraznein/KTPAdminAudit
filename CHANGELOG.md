@@ -4,6 +4,9 @@ All notable changes to KTP Admin Audit will be documented in this file.
 
 ## [2.7.18] - 2026-07-18
 
+### Changed
+- Swapped the dead `<:ktp:…>` Discord emoji token for the current `<:KTP:1002382703020212245>` in all audit-embed titles (the old one renders as raw text since 2026-07-17). Cosmetic; part of the fleet-wide emoji sweep.
+
 ### Fixed
 - **`.changemap` match-liveness TOCTOU (match-integrity)** — `ktp_is_match_active()` was checked exactly once, when the map menu opened in `cmd_changemap`. The menu uses `show_menu(..., -1, ...)` (unbounded timeout) and the changelevel then runs after a 5s countdown, so a match going live anywhere in that window would still be force-ended: KTPMatchHandler's own `RH_Host_Changelevel_f` hook ends a live match on *any* changelevel regardless of origin, so suppressing our own changelevel is the only thing that protects the match. Liveness is now re-checked at `execute_changemap()` (before the lock is taken and the countdown starts), on every `task_changelevel_countdown` tick (which covers the final tick immediately before the `changelevel` fire), and in the `task_changelevel_safety` fallback before its independent fire. If a match is live, the changemap aborts, broadcasts a chat notice, and clears the lock (`reset_changemap_lock`, which also removes both changelevel tasks) so future changemaps still work. The pre-existing kick/ban actor/target re-check pattern covered other races on this path but not this one.
 
