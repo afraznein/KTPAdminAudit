@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.17
+/* KTP Admin Audit v2.7.18
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.17
- * DATE: 2026-07-08
+ * VERSION: 2.7.18
+ * DATE: 2026-07-18
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -56,6 +56,14 @@
  * their unban epoch and re-applied at boot for the remaining time)
  *
  * ========== CHANGELOG ==========
+ * v2.7.18 (2026-07-18) - .changemap match-liveness TOCTOU closed. The map menu
+ *                        has an unbounded timeout and the countdown runs 5s, so
+ *                        a match could go live after the menu opened (liveness
+ *                        was checked only once, at menu open) and the changelevel
+ *                        would then force-end it (MatchHandler ends the match on
+ *                        ANY changelevel). Now re-checked at execute time and
+ *                        every countdown tick incl. the fire, plus the safety
+ *                        fallback — aborts + clears the lock if a match is live.
  * v2.7.17 (2026-07-08) - .unban <steamid>: removeid + deferred writeid +
  *                        timed-ban record removal in one audited command
  *                        (closes the manual-removeid re-ban trap); strict
@@ -261,7 +269,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN_NAME    "KTP Admin Audit"
-#define PLUGIN_VERSION "2.7.17"
+#define PLUGIN_VERSION "2.7.18"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Menu action constants
@@ -1971,6 +1979,15 @@ execute_changemap(admin_id, const mapName[], const displayName[])
 		return;
 	}
 
+	// Re-check liveness at execute time. The menu has an unbounded timeout, so a
+	// match may have gone live since cmd_changemap opened it (that's the only
+	// liveness check). Firing now would force-end the match.
+	if (ktp_is_match_active())
+	{
+		client_print(admin_id, print_chat, "[KTP] Cannot change map during an active match.");
+		return;
+	}
+
 	new adminName[32], adminAuth[35];
 	get_user_name(admin_id, adminName, charsmax(adminName));
 	get_user_authid(admin_id, adminAuth, charsmax(adminAuth));
@@ -2076,9 +2093,27 @@ stock start_changelevel_countdown()
 		g_pendingChangeMapDisplay[0] ? g_pendingChangeMapDisplay : g_pendingChangeMap, g_changeMapCountdown);
 }
 
+// A match can go live while the map menu sits open or during the 5s countdown.
+// Firing the changelevel then would force-end it (MatchHandler ends the match on
+// ANY changelevel). Abort + clear the lock instead. Returns true if it aborted.
+bool:abort_changemap_if_match_live()
+{
+	if (!ktp_is_match_active())
+		return false;
+
+	log_amx("[KTP] Changemap to '%s' aborted - a match went live before the changelevel fired", g_pendingChangeMap);
+	client_print(0, print_chat, "[KTP] Map change aborted - a match is now live.");
+	reset_changemap_lock();  // also removes both changelevel tasks
+	return true;
+}
+
 // Countdown task for map change
 public task_changelevel_countdown()
 {
+	// Runs every tick, so this covers the final tick immediately before the fire.
+	if (abort_changemap_if_match_live())
+		return;
+
 	g_changeMapCountdown--;
 
 	if (g_changeMapCountdown <= 0) {
@@ -2123,6 +2158,11 @@ public task_changelevel_safety()
 {
 	if (!g_changeMapInProgress)
 		return;  // Countdown already completed normally
+
+	// Same liveness re-check as the countdown fire path — a match may have gone
+	// live while the repeating task was dead.
+	if (abort_changemap_if_match_live())
+		return;
 
 	// The repeating task never fired - execute changelevel directly
 	log_amx("[KTP] WARNING: Changelevel countdown task failed - safety fallback executing changelevel to %s", g_pendingChangeMap);

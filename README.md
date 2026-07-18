@@ -1,6 +1,6 @@
 # KTP Admin Audit Plugin
 
-**Version:** 2.7.17
+**Version:** 2.7.18
 **Author:** Nein_
 **Date:** July 2026
 
