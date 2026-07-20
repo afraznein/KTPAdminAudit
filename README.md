@@ -35,12 +35,19 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 - **KTP AMX 2.6+** (for ktp_discord.inc curl module and ktp_drop_client native)
 - **KTP ReHLDS 3.20+** (for RH_SV_Rcon and RH_Host_Changelevel_f hooks)
 - **KTP ReAPI 5.29+** (for hookchain registration)
-- **KTPMatchHandler** (optional - for match-active detection on .changemap)
+- **KTPMatchHandler** (**required**) — supplies the `ktp_is_match_active()`
+  native used for match-active detection on `.changemap`. This plugin declares
+  it without a native filter, so AMXX resolves it at load: if KTPMatchHandler
+  is absent or loads later, **KTPAdminAudit fails to load entirely** — it does
+  not degrade to "no match detection". Order it after KTPMatchHandler in
+  `plugins.ini`.
 - **ktp_discord.inc** (shared Discord integration)
 
 ## Installation
 
-1. Copy `KTPAdminAudit.amxx` to `addons/ktpamx/plugins/`
+1. Build the plugin — `bash compile.sh` — then copy `compiled/KTPAdminAudit.amxx`
+   to `addons/ktpamx/plugins/`. The repo ships no prebuilt `.amxx`; build output is
+   gitignored so a stale binary can't be mistaken for the current one.
 2. Add to `plugins.ini`:
    ```
    KTPAdminAudit.amxx
@@ -55,11 +62,13 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 |---------|------------|-------------|
 | `.kick` or `/kick` | ADMIN_KICK (c) | Open kick menu |
 | `.ban` or `/ban` | ADMIN_BAN (d) | Open ban menu |
+| `.unban <steamid>` or `/unban` | ADMIN_BAN (d) | Lift a ban — removeid + writeid + timed-ban record removal |
 | `.changemap` or `/changemap` | All players | Open map selection menu (blocked during matches) |
 | `.restart` or `/restart` | ADMIN_RCON (l) | Restart server |
 | `.quit` or `/quit` | ADMIN_RCON (l) | Shutdown server |
 | `ktp_kick` | ADMIN_KICK (c) | Console command for kick menu |
 | `ktp_ban` | ADMIN_BAN (d) | Console command for ban menu |
+| `ktp_unban` | ADMIN_BAN (d) | Console command for unban |
 | `ktp_changemap` | All players | Console command for map menu |
 
 **Note:** All chat commands also work via team chat (`say_team`).
@@ -70,7 +79,7 @@ Designed to work with KTP ReHLDS where kick/ban console commands are blocked at 
 |------|------|-------------|
 | `a` | ADMIN_IMMUNITY | Protected from kick/ban |
 | `c` | ADMIN_KICK | Can kick players |
-| `d` | ADMIN_BAN | Can ban players |
+| `d` | ADMIN_BAN | Can ban and unban players |
 | `l` | ADMIN_RCON | Can use .restart / .quit commands |
 
 ### Example users.ini
@@ -161,6 +170,9 @@ KTP ReHLDS blocks the `kick` console command to prevent remote/untraceable kicks
 
 ## Discord Notification Format
 
+Audit alerts are Discord embeds: the title carries the KTP emoji and the description
+uses markdown. The two samples below are illustrative, not literal.
+
 **Kick:**
 ```
 Admin KICK
@@ -175,6 +187,11 @@ Admin: PlayerName (STEAM_0:1:12345678)
 Target: TargetName (STEAM_0:1:87654321)
 Duration: 1 day
 ```
+
+The plugin emits eleven audit embed types in total: Admin KICK, Admin KICK (invalid
+SteamID), Admin BAN, Admin UNBAN, Admin Map Change, Admin Server Restart, Admin Server
+Shutdown, Console Server Control, RCON Server Control, RCON Quit BLOCKED, and RCON Auth
+Failures.
 
 ## Troubleshooting
 
@@ -194,8 +211,8 @@ Duration: 1 day
 
 ## Building
 
-```batch
-compile.bat
+```bash
+wsl bash -c "cd '/mnt/n/Nein_/KTP Git Projects/KTPAdminAudit' && bash compile.sh"
 ```
 
 Uses WSL with KTPAMXX compiler. Output is staged to `N:\Nein_\KTP Git Projects\KTP DoD Server\serverfiles\dod\addons\ktpamx\plugins\`.

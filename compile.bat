@@ -1,4 +1,6 @@
 @echo off
+:: DEPRECATED — use compile.sh (WSL). The STAGE_DIR below points at a path that
+:: does not exist, so this script does not stage where the README says.
 setlocal EnableDelayedExpansion
 
 :: Skip pause if running non-interactively (set CI=1 before calling)

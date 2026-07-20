@@ -20,3 +20,7 @@ Thumbs.db
 
 # machine-local Claude permissions (skills ARE published)
 .claude/settings.local.json
+
+# Compiled plugins belong in the gitignored compiled/ dir, never the repo root.
+# A tracked root .amxx went stale by 7 months while install docs pointed at it.
+/*.amxx

@@ -2,6 +2,54 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [Unreleased]
+
+### Fixed — KTPMatchHandler documented as optional; it is required
+
+The Requirements list called KTPMatchHandler "(optional - for match-active
+detection on .changemap)", while the Features list three lines earlier said
+`.changemap` protection "requires KTPMatchHandler".
+
+Required is correct. `ktp_is_match_active()` is declared as a plain `native` with
+no `set_native_filter`, so AMXX resolves it at load: without KTPMatchHandler this
+plugin **fails to load entirely** rather than degrading to "no match detection".
+(KTPPracticeMode makes the same dependency genuinely optional by installing a
+native filter — this plugin does not.) Documented as required, with a note to
+order it after KTPMatchHandler in `plugins.ini`.
+
+### Removed — stale tracked plugin binary the install docs pointed at
+
+`KTPAdminAudit.amxx` sat in the repo root at **2.1.0**, last touched 2025-12-21,
+while source is 2.7.18. Installation step 1 said "Copy `KTPAdminAudit.amxx` to
+`addons/ktpamx/plugins/`" — so following the README verbatim deployed a
+seven-month-old plugin to a production server.
+
+Build output belongs in the gitignored `compiled/` dir (which `compile.sh`
+already writes to); the root binary predated that convention. Removed, README
+now directs you to build first and deploy `compiled/KTPAdminAudit.amxx`, and a
+`/*.amxx` rule keeps a root binary from reappearing.
+
+### Documentation
+
+Every documented admin permission flag was re-verified against the flag actually
+checked in its handler — `.kick`/`ktp_kick` ADMIN_KICK, `.ban`/`ktp_ban` ADMIN_BAN,
+`.restart` and `.quit` ADMIN_RCON, `.changemap` unrestricted, immunity filtered in
+the menu and re-checked at execute. **All correct, no flag was misstated.** The
+gaps were coverage and build docs:
+
+- **`.unban` / `/unban` / `ktp_unban` were missing from the Commands table.** They
+  are registered and gated on ADMIN_BAN. The command was described in prose twice,
+  but an admin scanning the table for "what can I run" would not find it. Added,
+  and the `d` flag row now reads "Can ban and unban players".
+- The Building section paired a `compile.bat` invocation with `compile.sh`'s
+  staging path. `compile.bat` stages somewhere else — a path that does not exist.
+  The section now gives the canonical WSL `compile.sh` command, which makes the
+  staging sentence true as written; `compile.bat` carries an in-file deprecation
+  banner.
+- Discord Notification Format documented 2 of the 11 audit embed types the plugin
+  emits. All eleven are now listed, and the two samples are labelled illustrative
+  (real embeds carry the KTP emoji title and markdown body).
+
 ## [2.7.18] - 2026-07-18
 
 ### Changed
