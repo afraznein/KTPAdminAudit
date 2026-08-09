@@ -2,6 +2,43 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
+## [2.7.20] - 2026-08-09
+
+### Added — apply the central KTP ban list distributed from the AC API
+
+Game-layer SteamID bans have never had a central store. They lived only in each
+instance's engine ban list, applied by an admin pasting `amx_addban` into 24
+servers by hand — no fleet-wide answer to "who is banned", and no way to unban in
+one action. The AC API now renders the full active list to
+`<configsdir>/ktp_ac_bans.ini` and the file distributor pushes it; this applies it.
+
+**Why a plugin rather than `banned.cfg`.** The engine OWNS `banned.cfg` via
+`writeid`, so a distributed copy fights the engine's own rewrites. The failure
+lands on UNBAN: an instance holding a stale in-memory entry re-persists it on the
+next `writeid`, silently re-banning one person on one box. Only a game-side actor
+can `removeid`, which is what makes a revocation actually propagate.
+
+**Removes only what it applied.** `g_acApplied` is that record — an in-game admin
+ban never enters it and is therefore never lifted by a list refresh.
+
+**A partial file is not a shorter ban list.** The render carries a
+`; END rows=N` terminator; if it is missing or disagrees with the parsed count,
+the previous list is kept and the mismatch logged. Applying a fragment would
+silently unban everyone past the truncation point — the one failure here that
+looks exactly like success. An empty-but-*valid* list is deliberately distinct and
+does unban everyone.
+
+The list carries an absolute unban **epoch**, never minutes-remaining, and minutes
+are computed at apply time: a stored duration expires differently on every
+instance depending on when it last booted.
+
+Applied on every map (`plugin_cfg` runs per map in extension mode) plus a 60s
+poll, so a push lands within a minute. Unchanged generations short-circuit before
+any reconcile work.
+
+Logs `AC_BANLIST_APPLIED generation= active= added= removed= expired= malformed=`,
+or `AC_BANLIST_INCOMPLETE` / `AC_BANLIST_CAPPED` when it declines to apply.
+
 ## [2.7.19] - 2026-08-09
 
 ### Changed — collapsed the redundant if/else in the four page-nav branches

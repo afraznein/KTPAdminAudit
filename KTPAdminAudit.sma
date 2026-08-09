@@ -273,7 +273,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN_NAME    "KTP Admin Audit"
-#define PLUGIN_VERSION "2.7.19"
+#define PLUGIN_VERSION "2.7.20"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Menu action constants
@@ -344,6 +344,18 @@ new bool:g_ownRestartPending = false;
 // timed ban is recorded with its unban epoch and re-applied at boot.
 #define TIMED_BANS_FILE "ktp_timed_bans.ini"
 #define MAX_TIMED_BANS 64
+
+#define AC_BANS_FILE "ktp_ac_bans.ini"
+#define MAX_AC_BANS 256
+#define AC_BANS_POLL_SECONDS 60.0
+#define TASK_AC_BAN_POLL 54326
+
+new g_acApplied[MAX_AC_BANS][35];
+new g_acAppliedCount = 0;
+// Generation from the list header. -1 means "nothing applied yet", which is
+// distinct from generation 0 (an empty-but-valid list).
+new g_acGeneration = -1;
+
 new bool:g_timedBansReapplied = false; // globals persist across map changes — latches reapply to once per boot
 
 // RCON failure batching — the Discord relay has no queue and failed-rcon
@@ -451,6 +463,14 @@ public plugin_cfg()
 		task_flush_ban_records();
 	if (g_pendingUnbanCount > 0)
 		task_flush_unbans();
+
+	// Central ban list: apply on every map (plugin_cfg runs per map in extension
+	// mode) plus a poll, so a distribution push lands within a minute rather than
+	// waiting for the next map. Cheap when unchanged — the generation header short-
+	// circuits before any reconcile work.
+	refresh_ac_ban_list(false);
+	remove_task(TASK_AC_BAN_POLL);
+	set_task(AC_BANS_POLL_SECONDS, "task_ac_ban_poll", TASK_AC_BAN_POLL, _, _, "b");
 
 	// Re-apply persisted timed bans once per boot (latch survives map changes)
 	if (!g_timedBansReapplied)
@@ -2169,4 +2189,201 @@ public task_changelevel_safety()
 	// No server_exec() — see task_changelevel_countdown(): a synchronous exec from
 	// inside a task callback wedges the destination map's AMXX task scheduler. The
 	// queued command flushes on the next engine frame.
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Central ban list (KTP AC) — distributed file, applied here.
+//
+// The AC API renders the FULL active ban list to <configsdir>/ktp_ac_bans.ini and
+// the file distributor pushes it to every instance. This applies it.
+//
+// Why a plugin and not banned.cfg: the engine OWNS banned.cfg via writeid, so a
+// distributed copy fights the engine's own rewrites. The failure lands on UNBAN —
+// an instance holding a stale in-memory entry re-persists it on the next writeid,
+// silently re-banning one person on one box. Only a game-side actor can removeid,
+// which is what makes a revocation actually propagate.
+//
+// We remove ONLY what we applied. g_acApplied is the record of that; an in-game
+// admin ban never appears in it and is therefore never lifted by a list refresh.
+// ─────────────────────────────────────────────────────────────────────────────
+get_ac_bans_path(path[], len)
+{
+	new configsDir[128];
+	get_configsdir(configsDir, charsmax(configsDir));
+	formatex(path, len, "%s/%s", configsDir, AC_BANS_FILE);
+}
+
+// Header line: "; version=1 generation=<n> rows=<n> rendered_utc=..."
+// Returns the generation, or -1 when the line carries none.
+parse_ac_header_generation(const line[])
+{
+	new pos = contain(line, "generation=");
+	if (pos < 0)
+		return -1;
+	return str_to_num(line[pos + 11]);
+}
+
+// Terminator: "; END rows=<n> generation=<n>". Its ABSENCE is the whole point —
+// a truncated transfer otherwise reads as a shorter ban list, and applying that
+// would lift every ban past the cut.
+parse_ac_end_rows(const line[])
+{
+	new pos = contain(line, "; END rows=");
+	if (pos != 0)
+		return -1;
+	return str_to_num(line[11]);
+}
+
+bool:ac_is_applied(const sid[])
+{
+	for (new i = 0; i < g_acAppliedCount; i++)
+		if (equal(g_acApplied[i], sid))
+			return true;
+	return false;
+}
+
+public task_ac_ban_poll()
+{
+	refresh_ac_ban_list(false);
+}
+
+// force=true re-applies even when the generation is unchanged (admin command).
+refresh_ac_ban_list(bool:force)
+{
+	new path[192];
+	get_ac_bans_path(path, charsmax(path));
+
+	new file = fopen(path, "r");
+	if (!file)
+		return;   // not distributed yet — silent, this is the normal pre-rollout state
+
+	static sids[MAX_AC_BANS][35];
+	static epochs[MAX_AC_BANS];
+	new count = 0, malformed = 0, generation = -1, endRows = -1;
+	new bool:capped = false;
+
+	new line[192];
+	while (fgets(file, line, charsmax(line)))
+	{
+		trim(line);
+		if (!line[0])
+			continue;
+		if (line[0] == ';' || line[0] == '#')
+		{
+			if (generation < 0)
+				generation = parse_ac_header_generation(line);
+			new e = parse_ac_end_rows(line);
+			if (e >= 0)
+				endRows = e;
+			continue;
+		}
+
+		// steamid|unban_epoch|reason  (epoch 0 = permanent)
+		new pipe1 = contain(line, "|");
+		if (pipe1 <= 0)
+		{
+			malformed++;
+			continue;
+		}
+		new sid[35], epoch = 0;
+		copy(sid, min(pipe1, charsmax(sid)), line);
+		new epochStart = pipe1 + 1;
+		new pipe2 = contain(line[epochStart], "|");
+		new epochStr[16];
+		if (pipe2 > 0)
+			copy(epochStr, min(pipe2, charsmax(epochStr)), line[epochStart]);
+		else
+			copy(epochStr, charsmax(epochStr), line[epochStart]);
+		epoch = str_to_num(epochStr);
+
+		if (!equal(sid, "STEAM_", 6))
+		{
+			malformed++;
+			log_amx("[KTP] AC_BANLIST_MALFORMED skipped: '%s'", line);
+			continue;
+		}
+		if (count >= MAX_AC_BANS)
+		{
+			capped = true;
+			break;
+		}
+		copy(sids[count], charsmax(sids[]), sid);
+		epochs[count] = epoch;
+		count++;
+	}
+	fclose(file);
+
+	// A list that does not carry its terminator is a PARTIAL file. Keep whatever we
+	// already applied and say so — applying a fragment would silently unban everyone
+	// past the truncation point, which is the one failure that looks like success.
+	if (endRows < 0 || endRows != count)
+	{
+		log_amx("[KTP] AC_BANLIST_INCOMPLETE parsed=%d declared=%d — KEEPING previous list (%d entries)",
+			count, endRows, g_acAppliedCount);
+		return;
+	}
+	if (capped)
+	{
+		log_amx("[KTP] AC_BANLIST_CAPPED list exceeds %d entries — KEEPING previous list", MAX_AC_BANS);
+		return;
+	}
+	if (!force && generation >= 0 && generation == g_acGeneration)
+		return;   // unchanged; the common path, and it costs one read
+
+	// Apply additions. banid with 0 is permanent; a timed entry converts the absolute
+	// epoch to minutes REMAINING at this instant — which is why the list carries an
+	// instant and not a duration.
+	new now = get_systime();
+	new added = 0, removed = 0, skippedExpired = 0;
+	for (new i = 0; i < count; i++)
+	{
+		if (epochs[i] > 0 && epochs[i] <= now)
+		{
+			skippedExpired++;
+			continue;
+		}
+		if (ac_is_applied(sids[i]))
+			continue;
+		new minutes = 0;
+		if (epochs[i] > 0)
+			minutes = (epochs[i] - now + 59) / 60;   // round up — never under-ban
+		server_cmd("banid %d %s", minutes, sids[i]);
+		added++;
+	}
+
+	// Remove what WE applied and the list no longer carries. Anything an in-game admin
+	// banned is absent from g_acApplied, so it survives untouched.
+	for (new i = 0; i < g_acAppliedCount; i++)
+	{
+		new bool:stillListed = false;
+		for (new j = 0; j < count; j++)
+		{
+			if (equal(g_acApplied[i], sids[j]) && (epochs[j] == 0 || epochs[j] > now))
+			{
+				stillListed = true;
+				break;
+			}
+		}
+		if (!stillListed)
+		{
+			server_cmd("removeid %s", g_acApplied[i]);
+			removed++;
+		}
+	}
+	if (added || removed)
+		server_exec();
+
+	// Rebuild the applied set from what the list actually holds now.
+	g_acAppliedCount = 0;
+	for (new i = 0; i < count && g_acAppliedCount < MAX_AC_BANS; i++)
+	{
+		if (epochs[i] > 0 && epochs[i] <= now)
+			continue;
+		copy(g_acApplied[g_acAppliedCount], charsmax(g_acApplied[]), sids[i]);
+		g_acAppliedCount++;
+	}
+	g_acGeneration = generation;
+
+	log_amx("[KTP] AC_BANLIST_APPLIED generation=%d active=%d added=%d removed=%d expired=%d malformed=%d",
+		generation, g_acAppliedCount, added, removed, skippedExpired, malformed);
 }
