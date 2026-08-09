@@ -2,7 +2,17 @@
 
 All notable changes to KTP Admin Audit will be documented in this file.
 
-## [Unreleased]
+## [2.7.19] - 2026-08-09
+
+### Changed — collapsed the redundant if/else in the four page-nav branches
+
+Both paginated menus (`.kick`/`.ban` player list, `.changemap` map list) built
+their "Next Page" and "Previous Page" rows from an `if`/`else` whose two arms
+were the same `formatex` call with the same destination, the same length bound
+and the same trailing text — differing only in the AMXX colour prefix
+(selectable vs. greyed out). Four two-line branches became four one-line calls
+that select the row text instead. **No behaviour change** — the emitted menu
+strings are byte-identical.
 
 ### Fixed — KTPMatchHandler documented as optional; it is required
 

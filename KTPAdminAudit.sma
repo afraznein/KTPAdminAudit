@@ -1,9 +1,9 @@
-/* KTP Admin Audit v2.7.18
+/* KTP Admin Audit v2.7.19
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.18
- * DATE: 2026-07-18
+ * VERSION: 2.7.19
+ * DATE: 2026-08-09
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
  * ========== OVERVIEW ==========
@@ -56,6 +56,10 @@
  * their unban epoch and re-applied at boot for the remaining time)
  *
  * ========== CHANGELOG ==========
+ * v2.7.19 (2026-08-09) - Page-nav branches collapsed. Both paginated menus built
+ *   their Next/Previous Page rows from an if/else whose arms differed only in the
+ *   colour prefix; four branches are now four single calls. No behaviour change.
+ *
  * v2.7.18 (2026-07-18) - .changemap match-liveness TOCTOU closed. The map menu
  *                        has an unbounded timeout and the countdown runs 5s, so
  *                        a match could go live after the menu opened (liveness
@@ -269,7 +273,7 @@ native ktp_drop_client(id, const reason[] = "");
 native ktp_is_match_active();
 
 #define PLUGIN_NAME    "KTP Admin Audit"
-#define PLUGIN_VERSION "2.7.18"
+#define PLUGIN_VERSION "2.7.19"
 #define PLUGIN_AUTHOR  "Nein_"
 
 // Menu action constants
@@ -851,16 +855,11 @@ show_player_menu(id)
 		itemNum++;
 	}
 
-	// Navigation
-	if (endIdx < g_validPlayerCount[id])
-		len += formatex(menu[len], charsmax(menu) - len, "^n\r8.\w Next Page");
-	else
-		len += formatex(menu[len], charsmax(menu) - len, "^n\d8. Next Page");
-
-	if (g_menuPage[id] > 0)
-		len += formatex(menu[len], charsmax(menu) - len, "^n\r9.\w Previous Page");
-	else
-		len += formatex(menu[len], charsmax(menu) - len, "^n\d9. Previous Page");
+	// Navigation — \r\w is the selectable colouring, \d greys the entry out
+	len += formatex(menu[len], charsmax(menu) - len, "^n%s",
+		(endIdx < g_validPlayerCount[id]) ? "\r8.\w Next Page" : "\d8. Next Page");
+	len += formatex(menu[len], charsmax(menu) - len, "^n%s",
+		(g_menuPage[id] > 0) ? "\r9.\w Previous Page" : "\d9. Previous Page");
 
 	len += formatex(menu[len], charsmax(menu) - len, "^n^n\r0.\w Cancel");
 
@@ -1895,16 +1894,11 @@ show_map_menu(id)
 		itemNum++;
 	}
 
-	// Navigation
-	if (endIdx < g_mapCount)
-		len += formatex(menu[len], charsmax(menu) - len, "^n\r8.\w Next Page");
-	else
-		len += formatex(menu[len], charsmax(menu) - len, "^n\d8. Next Page");
-
-	if (g_menuPage[id] > 0)
-		len += formatex(menu[len], charsmax(menu) - len, "^n\r9.\w Previous Page");
-	else
-		len += formatex(menu[len], charsmax(menu) - len, "^n\d9. Previous Page");
+	// Navigation — \r\w is the selectable colouring, \d greys the entry out
+	len += formatex(menu[len], charsmax(menu) - len, "^n%s",
+		(endIdx < g_mapCount) ? "\r8.\w Next Page" : "\d8. Next Page");
+	len += formatex(menu[len], charsmax(menu) - len, "^n%s",
+		(g_menuPage[id] > 0) ? "\r9.\w Previous Page" : "\d9. Previous Page");
 
 	len += formatex(menu[len], charsmax(menu) - len, "^n^n\r0.\w Cancel");
 
