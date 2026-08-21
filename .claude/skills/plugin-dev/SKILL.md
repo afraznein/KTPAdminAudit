@@ -39,6 +39,19 @@ with a production incident or a reviewer-caught near-miss.
 - Any persistent lock/latch that must not survive a map change belongs in
   `plugin_cfg`, reset unconditionally every map — not left to a timeout to
   eventually clear it.
+- **An audited action that also ends the process races its own audit post.**
+  `.restart`/`.quit` fire a Discord embed asynchronously and then bring the
+  server down inside the same `hlds_run` process; the relay's reply arrives
+  after AMXX has reinitialised, and the completion callback then runs against
+  state that no longer belongs to it — a use-after-free, which is what the
+  short delay in front of the execute step is actually buying. Any new command
+  that terminates or restarts the server needs the same gap, and no new work
+  may be queued behind the post.
+- **"Banned" is not one global state.** Each ban plane in the stack is enforced
+  by whatever component owns that plane; the only thing enforced at game-server
+  connect is what reaches the distributed ban file this plugin applies. When
+  reasoning about whether someone can play, ask which plane the entry is in —
+  never treat a ban recorded elsewhere as a connect-time block.
 
 ## The menu/async TOCTOU rule (most important rule in this file)
 Every admin menu here (`show_menu(..., -1, ...)`) uses an **unbounded timeout**

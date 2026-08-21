@@ -195,6 +195,18 @@ Failures.
 
 ## Troubleshooting
 
+### Where the audit trail actually lives
+
+Discord aside, this plugin's KICK/BAN lines and the engine's `Reason:` codes exist
+**only in the server console log**. The game's own `dod/logs/L*.log` files carry no
+plugin lines at all, so a search there returns nothing and reads exactly like an
+action that was never audited. Two things follow from that. Console logs are
+CRLF-terminated, so any `$`-anchored pattern silently matches zero lines. And an
+admin kick **destroys evidence**: kicking a slot that looks stuck pre-empts the
+engine timeout that would have written down why the player was leaving, replacing a
+diagnosis with an administrative action. Let a suspected crash time out on its own
+if anyone will need to know the cause.
+
 ### "You don't have permission to kick players"
 - Check `users.ini` - ensure SteamID is correct
 - Verify connection flags are `ce` (steam auth + no password)
