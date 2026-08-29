@@ -126,7 +126,7 @@ touches the filesystem** — an unexpected change is the tell. Prefer copying in
 out to the scratch dir over running tools "in place".
 
 ## Workflow
-1. **Version bump** (every shipped change): `#define VERSION` and the header
+1. **Version bump** (every shipped change): `#define PLUGIN_VERSION` and the header
    comment in the `.sma` (keep both in sync — mismatches have shipped before),
    new `CHANGELOG.md` section, README version line.
 2. **Compile**: `wsl bash -c "cd '/mnt/n/Nein_/KTP Git Projects/KTPAdminAudit' && bash compile.sh"`
