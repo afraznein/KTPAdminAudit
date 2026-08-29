@@ -54,6 +54,6 @@ See `N:\Nein_\KTP Git Projects\CLAUDE.md` for paramiko SSH documentation.
 - `N:\Nein_\KTP Git Projects\KTP DoD Server` - Test server with staged plugins
 
 ## Key Files to Update on Version Bump
-1. `KTPAdminAudit.sma` - `#define VERSION` and header comment
+1. `KTPAdminAudit.sma` - `#define PLUGIN_VERSION`, the header comment, and the in-file CHANGELOG
 2. `CHANGELOG.md` - Add new version section
 3. `README.md` - Update version in header

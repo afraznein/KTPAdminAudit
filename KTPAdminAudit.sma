@@ -1,8 +1,8 @@
-/* KTP Admin Audit v2.7.19
+/* KTP Admin Audit v2.7.20
  * Menu-based admin kick/ban/changemap with full audit logging
  *
  * AUTHOR: Nein_
- * VERSION: 2.7.19
+ * VERSION: 2.7.20
  * DATE: 2026-08-09
  * GITHUB: https://github.com/afraznein/KTPAdminAudit
  *
@@ -56,6 +56,11 @@
  * their unban epoch and re-applied at boot for the remaining time)
  *
  * ========== CHANGELOG ==========
+ * v2.7.20 (2026-08-09) - Apply the central KTP ban list the AC API renders to
+ *   <configsdir>/ktp_ac_bans.ini (distributed fleet-wide). Lifts only entries
+ *   it applied itself; keeps the previous list on a truncated render. Full
+ *   rationale in CHANGELOG.md.
+ *
  * v2.7.19 (2026-08-09) - Page-nav branches collapsed. Both paginated menus built
  *   their Next/Previous Page rows from an if/else whose arms differed only in the
  *   colour prefix; four branches are now four single calls. No behaviour change.
